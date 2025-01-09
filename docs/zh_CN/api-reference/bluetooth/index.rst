@@ -8,15 +8,15 @@
 
    bt_common
    bt_le
-   :SOC_CLASSIC_BT_SUPPORTED: classic_bt
+   :SOC_BT_CLASSIC_SUPPORTED: classic_bt
    controller_vhci
-   esp-ble-mesh
+   :SOC_BLE_MESH_SUPPORTED: esp-ble-mesh
    nimble/index
 
-ESP-IDF 目前支持两个主机堆栈。基于 Bluedroid 的堆栈（默认）支持传统蓝牙和 BLE，而基于 Apache NimBLE 的堆栈仅支持 BLE。用户可参考如下信息进行选择：
+ESP-IDF 目前支持两个主机堆栈。基于 Bluedroid 的堆栈（默认）支持传统蓝牙和低功耗蓝牙 (Bluetooth® LE)，而基于 Apache NimBLE 的堆栈仅支持低功耗蓝牙。用户可参考如下信息进行选择：
 
-* 对于同时涉及传统蓝牙和 BLE 的用例，应该选用 Bluedroid。
-* 对于仅涉及 BLE 的用例，建议选用 NimBLE。在代码占用和运行时，NimBLE 对内存的要求较低，因此适用于此类场景。
+* 对于同时涉及传统蓝牙和低功耗蓝牙的用例，应该选用 Bluedroid。
+* 对于仅涉及低功耗蓝牙的用例，建议选用 NimBLE。在代码占用和运行时，NimBLE 对内存的要求较低，因此适用于此类场景。
 
 .. only:: esp32
 

@@ -1,11 +1,9 @@
-/* Matrix Keyboard (based on dedicated GPIO) example
+/*
+ * SPDX-FileCopyrightText: 2020-2024 Espressif Systems (Shanghai) CO LTD
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
-   This example code is in the Public Domain (or CC0 licensed, at your option.)
-
-   Unless required by applicable law or agreed to in writing, this
-   software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
-   CONDITIONS OF ANY KIND, either express or implied.
-*/
 #include <stdio.h>
 #include "esp_log.h"
 #include "matrix_keyboard.h"
@@ -21,10 +19,10 @@ esp_err_t example_matrix_kbd_event_handler(matrix_kbd_handle_t mkbd_handle, matr
     uint32_t key_code = (uint32_t)event_data;
     switch (event) {
     case MATRIX_KBD_EVENT_DOWN:
-        ESP_LOGI(TAG, "press event, key code = %04x", key_code);
+        ESP_LOGI(TAG, "press event, key code = %04"PRIx32, key_code);
         break;
     case MATRIX_KBD_EVENT_UP:
-        ESP_LOGI(TAG, "release event, key code = %04x", key_code);
+        ESP_LOGI(TAG, "release event, key code = %04"PRIx32, key_code);
         break;
     }
     return ESP_OK;

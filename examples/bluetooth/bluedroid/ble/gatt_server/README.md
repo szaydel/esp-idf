@@ -1,5 +1,5 @@
-| Supported Targets | ESP32 | ESP32-C3 |
-| ----------------- | ----- | -------- |
+| Supported Targets | ESP32 | ESP32-C2 | ESP32-C3 | ESP32-C5 | ESP32-C6 | ESP32-C61 | ESP32-H2 | ESP32-S3 |
+| ----------------- | ----- | -------- | -------- | -------- | -------- | --------- | -------- | -------- |
 
 # ESP-IDF Gatt Server Example
 
@@ -7,7 +7,7 @@ This example shows how create a GATT service by adding attributes one by one. Ho
 
 Hence, we also allow users to create a GATT service with an attribute table, which releases the user from adding attributes one by one. And it is recommended for users to use. For more information about this method, please refer to [gatt_server_service_table_demo](../gatt_server_service_table).
 
-This demo creates GATT a service and then starts advertising, waiting to be connected to a GATT client. 
+This demo creates GATT a service and then starts advertising, waiting to be connected to a GATT client.
 
 To test this demo, we can run the [gatt_client_demo](../gatt_client), which can scan for and connect to this demo automatically. They will start exchanging data once the GATT client has enabled the notification function of the GATT server.
 
@@ -23,7 +23,7 @@ idf.py set-target <chip_name>
 
 ### Hardware Required
 
-* A development board with ESP32/ESP32-C3 SoC (e.g., ESP32-DevKitC, ESP-WROVER-KIT, etc.)
+* A development board with ESP32/ESP32-C3/ESP32-C2/ESP32-H2/ESP-S3 SoC (e.g., ESP32-DevKitC, ESP-WROVER-KIT, etc.)
 * A USB cable for Power supply and programming
 
 See [Development Boards](https://www.espressif.com/en/products/devkits) for more information about it.
@@ -40,7 +40,7 @@ See the [Getting Started Guide](https://idf.espressif.com/) for full steps to co
 
 This example works with UUID16 as default. To change to UUID128, follow this steps:
 
-1. Change the UIID16 to UUID128. You can change the UUID according to your needs.
+1. Change the UUID16 to UUID128. You can change the UUID according to your needs.
 
 ```c
 // Create a new UUID128 (using random values for this example)

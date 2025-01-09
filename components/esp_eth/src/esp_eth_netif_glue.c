@@ -1,12 +1,13 @@
 /*
- * SPDX-FileCopyrightText: 2019-2021 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2019-2024 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
 #include <stdlib.h>
+#include <inttypes.h>
 #include "esp_netif.h"
-#include "esp_eth.h"
 #include "esp_eth_netif_glue.h"
+#include "esp_netif_net_stack.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_check.h"
@@ -28,16 +29,21 @@ struct esp_eth_netif_glue_t {
     esp_event_handler_instance_t get_ip_ctx_handler;
 };
 
-static esp_err_t eth_input_to_netif(esp_eth_handle_t eth_handle, uint8_t *buffer, uint32_t length, void *priv)
+static esp_err_t eth_input_to_netif(esp_eth_handle_t eth_handle, uint8_t *buffer, uint32_t length, void *priv, void *info)
 {
 #if CONFIG_ESP_NETIF_L2_TAP
     esp_err_t ret = ESP_OK;
-    ret = esp_vfs_l2tap_eth_filter(eth_handle, buffer, (size_t *)&length);
+    ret = esp_vfs_l2tap_eth_filter_frame(eth_handle, buffer, (size_t *)&length, info);
     if (length == 0) {
         return ret;
     }
 #endif
     return esp_netif_receive((esp_netif_t *)priv, buffer, length, NULL);
+}
+
+static void eth_l2_free(void *h, void* buffer)
+{
+    free(buffer);
 }
 
 static esp_err_t esp_eth_post_attach(esp_netif_t *esp_netif, void *args)
@@ -46,13 +52,13 @@ static esp_err_t esp_eth_post_attach(esp_netif_t *esp_netif, void *args)
     esp_eth_netif_glue_t *netif_glue = (esp_eth_netif_glue_t *)args;
     netif_glue->base.netif = esp_netif;
 
-    esp_eth_update_input_path(netif_glue->eth_driver, eth_input_to_netif, esp_netif);
+    esp_eth_update_input_path_info(netif_glue->eth_driver, eth_input_to_netif, esp_netif);
 
     // set driver related config to esp-netif
     esp_netif_driver_ifconfig_t driver_ifconfig = {
         .handle =  netif_glue->eth_driver,
         .transmit = esp_eth_transmit,
-        .driver_free_rx_buffer = NULL
+        .driver_free_rx_buffer = eth_l2_free
     };
 
     ESP_ERROR_CHECK(esp_netif_set_driver_config(esp_netif, &driver_ifconfig));
@@ -70,7 +76,7 @@ static void eth_action_start(void *handler_args, esp_event_base_t base, int32_t 
 {
     esp_eth_handle_t eth_handle = *(esp_eth_handle_t *)event_data;
     esp_eth_netif_glue_t *netif_glue = handler_args;
-    ESP_LOGD(TAG, "eth_action_start: %p, %p, %d, %p, %p", netif_glue, base, event_id, event_data, *(esp_eth_handle_t *)event_data);
+    ESP_LOGD(TAG, "eth_action_start: %p, %p, %" PRIi32 ", %p, %p", netif_glue, base, event_id, event_data, *(esp_eth_handle_t *)event_data);
     if (netif_glue->eth_driver == eth_handle) {
         esp_netif_action_start(netif_glue->base.netif, base, event_id, event_data);
     }
@@ -80,7 +86,7 @@ static void eth_action_stop(void *handler_args, esp_event_base_t base, int32_t e
 {
     esp_eth_handle_t eth_handle = *(esp_eth_handle_t *)event_data;
     esp_eth_netif_glue_t *netif_glue = handler_args;
-    ESP_LOGD(TAG, "eth_action_stop: %p, %p, %d, %p, %p", netif_glue, base, event_id, event_data, *(esp_eth_handle_t *)event_data);
+    ESP_LOGD(TAG, "eth_action_stop: %p, %p, %" PRIi32 ", %p, %p", netif_glue, base, event_id, event_data, *(esp_eth_handle_t *)event_data);
     if (netif_glue->eth_driver == eth_handle) {
         esp_netif_action_stop(netif_glue->base.netif, base, event_id, event_data);
     }
@@ -90,8 +96,11 @@ static void eth_action_connected(void *handler_args, esp_event_base_t base, int3
 {
     esp_eth_handle_t eth_handle = *(esp_eth_handle_t *)event_data;
     esp_eth_netif_glue_t *netif_glue = handler_args;
-    ESP_LOGD(TAG, "eth_action_connected: %p, %p, %d, %p, %p", netif_glue, base, event_id, event_data, *(esp_eth_handle_t *)event_data);
+    ESP_LOGD(TAG, "eth_action_connected: %p, %p, %" PRIi32 ", %p, %p", netif_glue, base, event_id, event_data, *(esp_eth_handle_t *)event_data);
     if (netif_glue->eth_driver == eth_handle) {
+        eth_speed_t speed;
+        esp_eth_ioctl(eth_handle, ETH_CMD_G_SPEED, &speed);
+        esp_netif_set_link_speed(netif_glue->base.netif, speed == ETH_SPEED_100M ? 100000000 : 10000000);
         esp_netif_action_connected(netif_glue->base.netif, base, event_id, event_data);
     }
 }
@@ -100,7 +109,7 @@ static void eth_action_disconnected(void *handler_args, esp_event_base_t base, i
 {
     esp_eth_handle_t eth_handle = *(esp_eth_handle_t *)event_data;
     esp_eth_netif_glue_t *netif_glue = handler_args;
-    ESP_LOGD(TAG, "eth_action_disconnected: %p, %p, %d, %p, %p", netif_glue, base, event_id, event_data, *(esp_eth_handle_t *)event_data);
+    ESP_LOGD(TAG, "eth_action_disconnected: %p, %p, %" PRIi32 ", %p, %p", netif_glue, base, event_id, event_data, *(esp_eth_handle_t *)event_data);
     if (netif_glue->eth_driver == eth_handle) {
         esp_netif_action_disconnected(netif_glue->base.netif, base, event_id, event_data);
     }
@@ -110,7 +119,7 @@ static void eth_action_got_ip(void *handler_args, esp_event_base_t base, int32_t
 {
     ip_event_got_ip_t *ip_event = (ip_event_got_ip_t *)event_data;
     esp_eth_netif_glue_t *netif_glue = handler_args;
-    ESP_LOGD(TAG, "eth_action_got_ip: %p, %p, %d, %p, %p", netif_glue, base, event_id, event_data, *(esp_eth_handle_t *)event_data);
+    ESP_LOGD(TAG, "eth_action_got_ip: %p, %p, %" PRIi32 ", %p, %p", netif_glue, base, event_id, event_data, *(esp_eth_handle_t *)event_data);
     if (netif_glue->base.netif == ip_event->esp_netif) {
         esp_netif_action_got_ip(ip_event->esp_netif, base, event_id, event_data);
     }

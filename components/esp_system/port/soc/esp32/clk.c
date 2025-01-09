@@ -1,22 +1,21 @@
 /*
- * SPDX-FileCopyrightText: 2015-2021 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2015-2024 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
 
 #include "soc/rtc.h"
 #include "soc/dport_reg.h"
-#include "soc/dport_access.h"
 #include "soc/i2s_reg.h"
-#include "hal/cpu_hal.h"
 #include "esp_private/periph_ctrl.h"
 #include "esp_private/esp_clk.h"
 #include "bootloader_clock.h"
 #include "hal/wdt_hal.h"
 
-#include "driver/spi_common_internal.h" // [refactor-todo]: for spicommon_periph_in_use
+#include "esp_private/spi_share_hw_ctrl.h"
 
 #include "esp_log.h"
+#include "esp_cpu.h"
 
 #include "esp_rom_uart.h"
 #include "esp_rom_sys.h"
@@ -36,11 +35,6 @@ static const char* TAG = "clk";
 #else
 #define RTC_XTAL_CAL_RETRY 1
 #endif
-
-/* Lower threshold for a reasonably-looking calibration value for a 32k XTAL.
- * The ideal value (assuming 32768 Hz frequency) is 1000000/32768*(2**19) = 16*10^6.
- */
-#define MIN_32K_XTAL_CAL_VAL  15000000L
 
 /* Indicates that this 32k oscillator gets input from external oscillator, rather
  * than a crystal.
@@ -85,7 +79,7 @@ static void select_rtc_slow_clk(slow_clk_sel_t slow_clk)
             // When SLOW_CLK_CAL_CYCLES is set to 0, clock calibration will not be performed at startup.
             if (SLOW_CLK_CAL_CYCLES > 0) {
                 cal_val = rtc_clk_cal(RTC_CAL_32K_XTAL, SLOW_CLK_CAL_CYCLES);
-                if (cal_val == 0 || cal_val < MIN_32K_XTAL_CAL_VAL) {
+                if (cal_val == 0) {
                     if (retry_32k_xtal-- > 0) {
                         continue;
                     }
@@ -105,33 +99,38 @@ static void select_rtc_slow_clk(slow_clk_sel_t slow_clk)
             cal_val = rtc_clk_cal(RTC_CAL_RTC_MUX, SLOW_CLK_CAL_CYCLES);
         } else {
             const uint64_t cal_dividend = (1ULL << RTC_CLK_CAL_FRACT) * 1000000ULL;
-            cal_val = (uint32_t) (cal_dividend / rtc_clk_slow_freq_get_hz());
+            cal_val = (uint32_t)(cal_dividend / rtc_clk_slow_freq_get_hz());
         }
     } while (cal_val == 0);
-    ESP_EARLY_LOGD(TAG, "RTC_SLOW_CLK calibration value: %d", cal_val);
+    ESP_EARLY_LOGD(TAG, "RTC_SLOW_CLK calibration value: %" PRIu32, cal_val);
     esp_clk_slowclk_cal_set(cal_val);
 }
 
- __attribute__((weak)) void esp_clk_init(void)
+void esp_rtc_init(void)
 {
     rtc_config_t cfg = RTC_CONFIG_DEFAULT();
     rtc_init(cfg);
+}
 
+__attribute__((weak)) void esp_clk_init(void)
+{
 #if (CONFIG_APP_COMPATIBLE_PRE_V2_1_BOOTLOADERS || CONFIG_APP_INIT_CLK)
     /* Check the bootloader set the XTAL frequency.
 
        Bootloaders pre-v2.1 don't do this.
     */
-    rtc_xtal_freq_t xtal_freq = rtc_clk_xtal_freq_get();
-    if (xtal_freq == RTC_XTAL_FREQ_AUTO) {
+    soc_xtal_freq_t xtal_freq = rtc_clk_xtal_freq_get();
+    if (xtal_freq == SOC_XTAL_FREQ_AUTO) {
         ESP_EARLY_LOGW(TAG, "RTC domain not initialised by bootloader");
         bootloader_clock_configure();
     }
 #else
     /* If this assertion fails, either upgrade the bootloader or enable CONFIG_APP_COMPATIBLE_PRE_V2_1_BOOTLOADERS */
-    assert(rtc_clk_xtal_freq_get() != RTC_XTAL_FREQ_AUTO);
+    assert(rtc_clk_xtal_freq_get() != SOC_XTAL_FREQ_AUTO);
 #endif
 
+    bool rc_fast_d256_is_enabled = rtc_clk_8md256_enabled();
+    rtc_clk_8m_enable(true, rc_fast_d256_is_enabled);
     rtc_clk_fast_src_set(SOC_RTC_FAST_CLK_SRC_RC_FAST);
 
 #ifdef CONFIG_BOOTLOADER_WDT_ENABLE
@@ -179,8 +178,8 @@ static void select_rtc_slow_clk(slow_clk_sel_t slow_clk)
 
     // Wait for UART TX to finish, otherwise some UART output will be lost
     // when switching APB frequency
-    if (CONFIG_ESP_CONSOLE_UART_NUM >= 0) {
-        esp_rom_uart_tx_wait_idle(CONFIG_ESP_CONSOLE_UART_NUM);
+    if (CONFIG_ESP_CONSOLE_ROM_SERIAL_PORT_NUM >= 0) {
+        esp_rom_output_tx_wait_idle(CONFIG_ESP_CONSOLE_ROM_SERIAL_PORT_NUM);
     }
 
     if (res) {
@@ -188,7 +187,7 @@ static void select_rtc_slow_clk(slow_clk_sel_t slow_clk)
     }
 
     // Re calculate the ccount to make time calculation correct.
-    cpu_hal_set_cycle_count( (uint64_t)cpu_hal_get_cycle_count() * new_freq_mhz / old_freq_mhz );
+    esp_cpu_set_cycle_count((uint64_t)esp_cpu_get_cycle_count() * new_freq_mhz / old_freq_mhz);
 }
 
 /* This function is not exposed as an API at this point.
@@ -203,14 +202,14 @@ __attribute__((weak)) void esp_perip_clk_init(void)
     uint32_t hwcrypto_perip_clk;
     uint32_t wifi_bt_sdio_clk;
 
-#if CONFIG_FREERTOS_UNICORE
+#if CONFIG_ESP_SYSTEM_SINGLE_CORE_MODE
     soc_reset_reason_t rst_reas[1];
 #else
     soc_reset_reason_t rst_reas[2];
 #endif
 
     rst_reas[0] = esp_rom_get_reset_reason(0);
-#if !CONFIG_FREERTOS_UNICORE
+#if !CONFIG_ESP_SYSTEM_SINGLE_CORE_MODE
     rst_reas[1] = esp_rom_get_reset_reason(1);
 #endif
 
@@ -218,35 +217,34 @@ __attribute__((weak)) void esp_perip_clk_init(void)
      * that have been enabled before reset.
      */
     if ((rst_reas[0] == RESET_REASON_CPU0_MWDT0 || rst_reas[0] == RESET_REASON_CPU0_SW || rst_reas[0] == RESET_REASON_CPU0_RTC_WDT)
-#if !CONFIG_FREERTOS_UNICORE
-        || (rst_reas[1] == RESET_REASON_CPU1_MWDT1 || rst_reas[1] == RESET_REASON_CPU1_SW || rst_reas[1] == RESET_REASON_CPU1_RTC_WDT)
+#if !CONFIG_ESP_SYSTEM_SINGLE_CORE_MODE
+            || (rst_reas[1] == RESET_REASON_CPU1_MWDT1 || rst_reas[1] == RESET_REASON_CPU1_SW || rst_reas[1] == RESET_REASON_CPU1_RTC_WDT)
 #endif
-    ) {
+       ) {
         common_perip_clk = ~DPORT_READ_PERI_REG(DPORT_PERIP_CLK_EN_REG);
         hwcrypto_perip_clk = ~DPORT_READ_PERI_REG(DPORT_PERI_CLK_EN_REG);
         wifi_bt_sdio_clk = ~DPORT_READ_PERI_REG(DPORT_WIFI_CLK_EN_REG);
-    }
-    else {
+    } else {
         common_perip_clk = DPORT_WDG_CLK_EN |
-                              DPORT_PCNT_CLK_EN |
-                              DPORT_LEDC_CLK_EN |
-                              DPORT_TIMERGROUP1_CLK_EN |
-                              DPORT_PWM0_CLK_EN |
-                              DPORT_TWAI_CLK_EN |
-                              DPORT_PWM1_CLK_EN |
-                              DPORT_PWM2_CLK_EN |
-                              DPORT_PWM3_CLK_EN;
+                           DPORT_PCNT_CLK_EN |
+                           DPORT_LEDC_CLK_EN |
+                           DPORT_TIMERGROUP1_CLK_EN |
+                           DPORT_PWM0_CLK_EN |
+                           DPORT_TWAI_CLK_EN |
+                           DPORT_PWM1_CLK_EN |
+                           DPORT_PWM2_CLK_EN |
+                           DPORT_PWM3_CLK_EN;
         hwcrypto_perip_clk = DPORT_PERI_EN_AES |
-                                DPORT_PERI_EN_SHA |
-                                DPORT_PERI_EN_RSA |
-                                DPORT_PERI_EN_SECUREBOOT;
+                             DPORT_PERI_EN_SHA |
+                             DPORT_PERI_EN_RSA |
+                             DPORT_PERI_EN_SECUREBOOT;
         wifi_bt_sdio_clk = DPORT_WIFI_CLK_WIFI_EN |
-                              DPORT_WIFI_CLK_BT_EN_M |
-                              DPORT_WIFI_CLK_UNUSED_BIT5 |
-                              DPORT_WIFI_CLK_UNUSED_BIT12 |
-                              DPORT_WIFI_CLK_SDIOSLAVE_EN |
-                              DPORT_WIFI_CLK_SDIO_HOST_EN |
-                              DPORT_WIFI_CLK_EMAC_EN;
+                           DPORT_WIFI_CLK_BT_EN_M |
+                           DPORT_WIFI_CLK_UNUSED_BIT5 |
+                           DPORT_WIFI_CLK_UNUSED_BIT12 |
+                           DPORT_WIFI_CLK_SDIOSLAVE_EN |
+                           DPORT_WIFI_CLK_SDIO_HOST_EN |
+                           DPORT_WIFI_CLK_EMAC_EN;
     }
 
     //Reset the communication peripherals like I2C, SPI, UART, I2S and bring them to known state.
@@ -277,10 +275,10 @@ __attribute__((weak)) void esp_perip_clk_init(void)
 //a weird mode where clock to the peripheral is disabled but reset is also disabled, it 'hangs'
 //in a state where it outputs a continuous 80MHz signal. Mask its bit here because we should
 //not modify that state, regardless of what we calculated earlier.
-    if (spicommon_periph_in_use(HSPI_HOST)) {
+    if (spicommon_periph_in_use(SPI2_HOST)) {
         common_perip_clk &= ~DPORT_SPI2_CLK_EN;
     }
-    if (spicommon_periph_in_use(VSPI_HOST)) {
+    if (spicommon_periph_in_use(SPI3_HOST)) {
         common_perip_clk &= ~DPORT_SPI3_CLK_EN;
     }
 #endif

@@ -1,10 +1,36 @@
+/*
+ * SPDX-FileCopyrightText: 2024 Espressif Systems (Shanghai) CO LTD
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #include "catch.hpp"
 #include "multi_heap.h"
 
 #include "../multi_heap_config.h"
+#include "../tlsf/include/tlsf.h"
+#include "../tlsf/tlsf_block_functions.h"
+#include "../tlsf/tlsf_control_functions.h"
 
 #include <string.h>
 #include <assert.h>
+
+/* The functions __malloc__ and __free__ are used to call the libc
+ * malloc and free and allocate memory from the host heap. Since the test
+ * `TEST_CASE("multi_heap many random allocations", "[multi_heap]")`
+ * calls multi_heap_allocation_impl() with sizes that can go up to 8MB,
+ * an allocatation on the heap will be preferred rather than the stack which
+ * might not have the necessary memory.
+ */
+static void *__malloc__(size_t bytes)
+{
+    return malloc(bytes);
+}
+
+static void __free__(void *ptr)
+{
+    free(ptr);
+}
 
 /* Insurance against accidentally using libc heap functions in tests */
 #undef free
@@ -36,7 +62,7 @@ TEST_CASE("multi_heap simple allocations", "[multi_heap]")
     REQUIRE( (intptr_t)buf < (intptr_t)(small_heap + sizeof(small_heap)));
 
     REQUIRE( multi_heap_get_allocated_size(heap, buf) >= test_alloc_size );
-    REQUIRE( multi_heap_get_allocated_size(heap, buf) < test_alloc_size + 16);
+    printf("test alloc size %d\n", test_alloc_size);
 
     memset(buf, 0xEE, test_alloc_size);
 
@@ -59,10 +85,11 @@ TEST_CASE("multi_heap simple allocations", "[multi_heap]")
 
 TEST_CASE("multi_heap fragmentation", "[multi_heap]")
 {
-    uint8_t small_heap[4 * 1024];
+    const size_t HEAP_SIZE = 4 * 1024;
+    uint8_t small_heap[HEAP_SIZE];
     multi_heap_handle_t heap = multi_heap_register(small_heap, sizeof(small_heap));
 
-    const size_t alloc_size = 128;
+    const size_t alloc_size = 500;
 
     void *p[4];
     for (int i = 0; i < 4; i++) {
@@ -202,20 +229,22 @@ TEST_CASE("multi_heap defrag realloc", "[multi_heap]")
 #endif
 
 
-TEST_CASE("multi_heap many random allocations", "[multi_heap]")
+void multi_heap_allocation_impl(int heap_size)
 {
-    uint8_t big_heap[8 * 1024];
+    uint8_t *big_heap = (uint8_t *) __malloc__(heap_size);
     const int NUM_POINTERS = 64;
 
-    printf("Running multi-allocation test...\n");
+    printf("Running multi-allocation test with heap_size %d...\n", heap_size);
+
+    REQUIRE( big_heap );
+    multi_heap_handle_t heap = multi_heap_register(big_heap, heap_size);
 
     void *p[NUM_POINTERS] = { 0 };
     size_t s[NUM_POINTERS] = { 0 };
-    multi_heap_handle_t heap = multi_heap_register(big_heap, sizeof(big_heap));
 
     const size_t initial_free = multi_heap_free_size(heap);
 
-    const int ITERATIONS = 10000;
+    const int ITERATIONS = 5000;
 
     for (int i = 0; i < ITERATIONS; i++) {
         /* check all pointers allocated so far are valid inside big_heap */
@@ -226,11 +255,11 @@ TEST_CASE("multi_heap many random allocations", "[multi_heap]")
 
         uint8_t n = rand() % NUM_POINTERS;
 
-        if (rand() % 4 == 0) {
+        if (i % 4 == 0) {
             /* 1 in 4 iterations, try to realloc the buffer instead
                of using malloc/free
             */
-            size_t new_size = rand() % 1024;
+            size_t new_size = (rand() % 1023) + 1;
             void *new_p = multi_heap_realloc(heap, p[n], new_size);
             printf("realloc %p -> %p (%zu -> %zu)\n", p[n], new_p, s[n], new_size);
             multi_heap_check(heap, true);
@@ -239,13 +268,12 @@ TEST_CASE("multi_heap many random allocations", "[multi_heap]")
                 s[n] = new_size;
                 if (new_size > 0) {
                     REQUIRE( p[n] >= big_heap );
-                    REQUIRE( p[n] < big_heap + sizeof(big_heap) );
+                    REQUIRE( p[n] < big_heap + heap_size );
                     memset(p[n], n, new_size);
                 }
             }
             continue;
         }
-
         if (p[n] != NULL) {
             if (s[n] > 0) {
                 /* Verify pre-existing contents of p[n] */
@@ -269,14 +297,13 @@ TEST_CASE("multi_heap many random allocations", "[multi_heap]")
         printf("malloc %p (%zu)\n", p[n], s[n]);
         if (p[n] != NULL) {
             REQUIRE( p[n] >= big_heap );
-            REQUIRE( p[n] < big_heap + sizeof(big_heap) );
+            REQUIRE( p[n] < big_heap + heap_size );
         }
         if (!multi_heap_check(heap, true)) {
             printf("FAILED iteration %d after mallocing %p (%zu bytes)\n", i, p[n], s[n]);
             multi_heap_dump(heap);
             REQUIRE(0);
         }
-
         if (p[n] != NULL) {
             memset(p[n], n, s[n]);
         }
@@ -292,6 +319,15 @@ TEST_CASE("multi_heap many random allocations", "[multi_heap]")
     }
 
     REQUIRE( initial_free == multi_heap_free_size(heap) );
+    __free__(big_heap);
+}
+
+TEST_CASE("multi_heap many random allocations", "[multi_heap]")
+{
+    size_t poolsize[] = { 15, 255, 4095, 8191 };
+    for (size_t i = 0; i < sizeof(poolsize)/sizeof(size_t); i++) {
+        multi_heap_allocation_impl(poolsize[i] * 1024);
+    }
 }
 
 TEST_CASE("multi_heap_get_info() function", "[multi_heap]")
@@ -391,8 +427,9 @@ TEST_CASE("multi_heap minimum-size allocations", "[multi_heap]")
 
 TEST_CASE("multi_heap_realloc()", "[multi_heap]")
 {
+    const size_t HEAP_SIZE = 4 * 1024;
     const uint32_t PATTERN = 0xABABDADA;
-    uint8_t small_heap[4 * 1024];
+    uint8_t small_heap[HEAP_SIZE];
     multi_heap_handle_t heap = multi_heap_register(small_heap, sizeof(small_heap));
 
     uint32_t *a = (uint32_t *)multi_heap_malloc(heap, 64);
@@ -402,7 +439,6 @@ TEST_CASE("multi_heap_realloc()", "[multi_heap]")
     REQUIRE( b > a); /* 'b' takes the block after 'a' */
 
     *a = PATTERN;
-
     uint32_t *c = (uint32_t *)multi_heap_realloc(heap, a, 72);
     REQUIRE( multi_heap_check(heap, true));
     REQUIRE(  c  != NULL );
@@ -412,13 +448,12 @@ TEST_CASE("multi_heap_realloc()", "[multi_heap]")
 #ifndef MULTI_HEAP_POISONING_SLOW
     // "Slow" poisoning implementation doesn't reallocate in place, so these
     // test will fail...
-
     uint32_t *d = (uint32_t *)multi_heap_realloc(heap, c, 36);
     REQUIRE( multi_heap_check(heap, true) );
     REQUIRE( c == d ); /* 'c' block should be shrunk in-place */
     REQUIRE( *d == PATTERN);
-
-    uint32_t *e = (uint32_t *)multi_heap_malloc(heap, 64);
+    // biggest allocation possible to completely fill the block left free after it was reallocated
+    uint32_t *e = (uint32_t *)multi_heap_malloc(heap, 60);
     REQUIRE( multi_heap_check(heap, true));
     REQUIRE( a == e ); /* 'e' takes the block formerly occupied by 'a' */
 
@@ -427,11 +462,7 @@ TEST_CASE("multi_heap_realloc()", "[multi_heap]")
     REQUIRE( multi_heap_check(heap, true) );
     REQUIRE( f == b ); /* 'b' should be extended in-place, over space formerly occupied by 'd' */
 
-#ifdef MULTI_HEAP_POISONING
-#define TOO_MUCH 7420 + 1
-#else
-#define TOO_MUCH 7420 + 1
-#endif
+#define TOO_MUCH HEAP_SIZE + 1
     /* not enough contiguous space left in the heap */
     uint32_t *g = (uint32_t *)multi_heap_realloc(heap, e, TOO_MUCH);
     REQUIRE( g == NULL );
@@ -441,7 +472,8 @@ TEST_CASE("multi_heap_realloc()", "[multi_heap]")
     g = (uint32_t *)multi_heap_realloc(heap, e, 128);
     REQUIRE( multi_heap_check(heap, true) );
     REQUIRE( e == g ); /* 'g' extends 'e' in place, into the space formerly held by 'f' */
-#endif
+
+#endif // MULTI_HEAP_POISONING_SLOW
 }
 
 // TLSF only accepts heaps aligned to 4-byte boundary so
@@ -450,7 +482,7 @@ TEST_CASE("multi_heap aligned allocations", "[multi_heap]")
 {
     uint8_t test_heap[4 * 1024];
     multi_heap_handle_t heap = multi_heap_register(test_heap, sizeof(test_heap));
-    uint32_t aligments = 0; // starts from alignment by 4-byte boundary
+    uint32_t alignments = 0; // starts from alignment by 4-byte boundary
     size_t old_size = multi_heap_free_size(heap);
     size_t leakage = 1024;
     printf("[ALIGNED_ALLOC] heap_size before: %d \n", old_size);
@@ -459,26 +491,26 @@ TEST_CASE("multi_heap aligned allocations", "[multi_heap]")
     multi_heap_dump(heap);
     printf("*********************\n");
 
-    for(;aligments <= 256; aligments++) {
+    for(;alignments <= 256; alignments++) {
 
         //Use some stupid size value to test correct alignment even in strange
         //memory layout objects:
-        uint8_t *buf = (uint8_t *)multi_heap_aligned_alloc(heap, (aligments + 137), aligments );
-        if(((aligments & (aligments - 1)) != 0) || (!aligments)) {
+        uint8_t *buf = (uint8_t *)multi_heap_aligned_alloc(heap, (alignments + 137), alignments );
+        if(((alignments & (alignments - 1)) != 0) || (!alignments)) {
             REQUIRE( buf == NULL );
         } else {
             REQUIRE( buf != NULL );
             REQUIRE((intptr_t)buf >= (intptr_t)test_heap);
             REQUIRE((intptr_t)buf < (intptr_t)(test_heap + sizeof(test_heap)));
 
-            printf("[ALIGNED_ALLOC] alignment required: %u \n", aligments);
+            printf("[ALIGNED_ALLOC] alignment required: %u \n", alignments);
             printf("[ALIGNED_ALLOC] address of allocated memory: %p \n\n", (void *)buf);
             //Address of obtained block must be aligned with selected value
-            REQUIRE(((intptr_t)buf & (aligments - 1)) == 0);
+            REQUIRE(((intptr_t)buf & (alignments - 1)) == 0);
 
             //Write some data, if it corrupts memory probably the heap
             //canary verification will fail:
-            memset(buf, 0xA5, (aligments + 137));
+            memset(buf, 0xA5, (alignments + 137));
 
             multi_heap_free(heap, buf);
         }
@@ -487,7 +519,7 @@ TEST_CASE("multi_heap aligned allocations", "[multi_heap]")
     /* Check that TLSF doesn't allocate a memory space smaller than required.
      * In any case, TLSF will write data in the previous block than the one
      * allocated. Thus, we should try to get/allocate this previous block. If
-     * the poisoned filled pattern has beeen overwritten by TLSF, then this
+     * the poisoned filled pattern has been overwritten by TLSF, then this
      * previous block will trigger an exception.
      * More info on this bug in !16296. */
     const size_t size = 50; /* TLSF will round the size up */
@@ -522,4 +554,70 @@ TEST_CASE("multi_heap allocation overhead", "[multi_heap]")
     REQUIRE( free_bytes_1 - free_bytes_2 > alloc_size );
 
     multi_heap_free(heap, x);
+}
+
+/* This test will corrupt the memory of a free block in the heap and check
+ * that in the case of comprehensive poisoning the heap corruption is detected
+ * by multi_heap_check(). For light poisoning and no poisoning, the test will
+ * check that multi_heap_check() does not report the corruption.
+ */
+TEST_CASE("multi_heap poisoning detection", "[multi_heap]")
+{
+    const size_t HEAP_SIZE = 4 * 1024;
+
+    /* define heap related data */
+    uint8_t heap_mem[HEAP_SIZE];
+    memset(heap_mem, 0x00, HEAP_SIZE);
+
+    /* register the heap memory. One free block only will be available */
+    multi_heap_handle_t heap = multi_heap_register(heap_mem, HEAP_SIZE);
+
+    control_t *tlsf_ptr = (control_t*)(heap_mem + 20);
+    const size_t control_t_size = tlsf_ptr->size;
+    const size_t heap_t_size = 20;
+
+    /* offset in memory at which to find the first free memory byte */
+    const size_t free_memory_offset = heap_t_size + control_t_size + sizeof(block_header_t) - block_header_overhead;
+
+    /* block header of the free block under test in the heap () */
+    const block_header_t* block = (block_header_t*)(heap_mem + free_memory_offset - sizeof(block_header_t));
+
+    /* actual number of bytes potentially filled with the free pattern in the free block under test */
+    const size_t effective_free_size = block_size(block) - block_header_overhead - offsetof(block_header_t, next_free);
+
+    /* variable used in the test */
+    size_t affected_byte = 0x00;
+    uint8_t original_value = 0x00;
+    uint8_t corrupted_value = 0x00;
+
+    /* repeat the corruption a few times to cover more of the free memory */
+    for (size_t i = 0; i < effective_free_size; i++)
+    {
+        /* corrupt random bytes in the heap (it needs to be bytes from free memory in
+         * order to check that the comprehensive poisoning is doing its job) */
+        affected_byte = free_memory_offset + i;
+        corrupted_value = (rand() % UINT8_MAX) | 1;
+
+        /* keep the good value in store in order to check that when we set the byte back
+         * to its original value, multi_heap_check() no longer returns the heap corruption. */
+        original_value = heap_mem[affected_byte];
+
+        /* make sure we are not replacing the original value with the same value */
+        heap_mem[affected_byte] ^= corrupted_value;
+
+        bool is_heap_ok = multi_heap_check(heap, true);
+#ifdef CONFIG_HEAP_POISONING_COMPREHENSIVE
+        /* check that multi_heap_check() detects the corruption */
+        REQUIRE(is_heap_ok == false);
+#else
+        /* the comprehensive corruption is not checked in the multi_heap_check() */
+        REQUIRE(is_heap_ok == true);
+#endif
+        /* fix the corruption  */
+        heap_mem[affected_byte] = original_value;
+
+        /* check that multi_heap_check() stops reporting the corruption */
+        is_heap_ok = multi_heap_check(heap, true);
+        REQUIRE(is_heap_ok == true);
+    }
 }

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020-2022 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2020-2024 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -25,19 +25,23 @@
  * - Most other malloc caps only fit in one region anyway.
  *
  */
-// IDF-4299
-const soc_memory_type_desc_t soc_memory_types[] = {
-    // Type 0: DRAM
-    { "DRAM", { MALLOC_CAP_8BIT | MALLOC_CAP_DEFAULT, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_32BIT, 0 }, false, false},
-    // Type 1: DRAM used for startup stacks
-    { "STACK/DRAM", { MALLOC_CAP_8BIT | MALLOC_CAP_DEFAULT,  MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_32BIT, MALLOC_CAP_RETENTION }, false, true},
-    // Type 2: DRAM which has an alias on the I-port
-    { "D/IRAM", { 0, MALLOC_CAP_DMA | MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL | MALLOC_CAP_DEFAULT, MALLOC_CAP_32BIT | MALLOC_CAP_EXEC }, true, false},
-    // Type 3: IRAM
-    { "IRAM", { MALLOC_CAP_EXEC | MALLOC_CAP_32BIT | MALLOC_CAP_INTERNAL, 0, 0 }, false, false},
+
+/* Index of memory in `soc_memory_types[]` */
+enum {
+    SOC_MEMORY_TYPE_RAM = 0,
+    SOC_MEMORY_TYPE_NUM,
 };
 
-#define SOC_MEMORY_TYPE_DEFAULT 2
+#ifdef CONFIG_ESP_SYSTEM_PMP_IDRAM_SPLIT
+#define ESP32C2_MEM_COMMON_CAPS (MALLOC_CAP_DEFAULT | MALLOC_CAP_DMA | MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL | MALLOC_CAP_32BIT)
+#else
+#define ESP32C2_MEM_COMMON_CAPS (MALLOC_CAP_DEFAULT | MALLOC_CAP_DMA | MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL | MALLOC_CAP_32BIT | MALLOC_CAP_EXEC)
+#endif
+
+const soc_memory_type_desc_t soc_memory_types[SOC_MEMORY_TYPE_NUM] = {
+    // Type 0: DRAM which has an alias on the I-port
+    [SOC_MEMORY_TYPE_RAM] = { "RAM", { ESP32C2_MEM_COMMON_CAPS, 0, 0 }},
+};
 
 const size_t soc_memory_type_count = sizeof(soc_memory_types) / sizeof(soc_memory_type_desc_t);
 
@@ -49,29 +53,19 @@ const size_t soc_memory_type_count = sizeof(soc_memory_types) / sizeof(soc_memor
  *
  */
 
-#define RAM_BOTTOM_LEVEL_REUSE_SIZE   0x18000
-#define RAM_BOTTOM_LEVEL_RESERVE_SIZE 0x8000
-#define MIN_ADDR_OF_STARTUP_STACK_TOP 0x3FCD81D0    //TODO: IDF-4585
-
-/*|------------------------------------  SRAM LEVEL 3  -------------------------------------|*/
-/*|0x3FCC0000                                                                     0x3FCDFFFF|*/
-/*|------------------------------------------------|--------------------------|-------------|*/
-/*|                  Shared Buffer                 |       Startup Stack      |  Interface  |*/
-/*|------------------------------------------------|--------------------------|-------------|*/
-/*| <---RAM_BOTTOM_LEVEL_REUSE_SIZE---> | <---------RAM_BOTTOM_LEVEL_RESERVE_SIZE---------> |*/
-/*|-----------------------------------------------------------------------------------------|*/
+/**
+ * Register the shared buffer area of the last memory block into the heap during heap initialization
+ */
+#define APP_USABLE_DRAM_END           (SOC_ROM_STACK_START - SOC_ROM_STACK_SIZE)
 
 const soc_memory_region_t soc_memory_regions[] = {
-    { 0x3FCA0000, 0x10000,                        SOC_MEMORY_TYPE_DEFAULT, 0x40380000}, //Block 1,  can be remapped to ROM, can be used as trace memory
-    { 0x3FCB0000, 0x10000,                        SOC_MEMORY_TYPE_DEFAULT, 0x40390000}, //Block 2,  can be remapped to ROM, can be used as trace memory
-    { 0x3FCC0000, RAM_BOTTOM_LEVEL_REUSE_SIZE,    SOC_MEMORY_TYPE_DEFAULT, 0x403A0000}, //Block 3,  can be remapped to ROM, can be used as trace memory
-    { 0x3FCC0000 + RAM_BOTTOM_LEVEL_REUSE_SIZE,   RAM_BOTTOM_LEVEL_RESERVE_SIZE, 1, 0x403A0000 + RAM_BOTTOM_LEVEL_REUSE_SIZE}  //Block 4,  can be used as trace memory
+    { 0x3FCA0000,           0x10000,                                   SOC_MEMORY_TYPE_RAM,    0x40380000, false},                          //D/IRAM level1
+    { 0x3FCB0000,           0x10000,                                   SOC_MEMORY_TYPE_RAM,    0x40390000, false},                          //D/IRAM level2
+    { 0x3FCC0000,           (APP_USABLE_DRAM_END-0x3FCC0000),          SOC_MEMORY_TYPE_RAM,    0x403A0000, false},                          //D/IRAM level3
+    { APP_USABLE_DRAM_END,  (SOC_DIRAM_DRAM_HIGH-APP_USABLE_DRAM_END), SOC_MEMORY_TYPE_RAM,    MAP_DRAM_TO_IRAM(APP_USABLE_DRAM_END), true} //D/IRAM level3 (ROM reserved area)
 };
 
-_Static_assert(0x3FCC0000 + RAM_BOTTOM_LEVEL_REUSE_SIZE <= MIN_ADDR_OF_STARTUP_STACK_TOP, "Heap reuse area overlaps startup stack");
-
 const size_t soc_memory_region_count = sizeof(soc_memory_regions) / sizeof(soc_memory_region_t);
-
 
 extern int _data_start, _heap_start, _iram_start, _iram_end;
 

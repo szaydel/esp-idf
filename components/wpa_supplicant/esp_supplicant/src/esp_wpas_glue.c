@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2019-2021 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2019-2024 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -68,19 +68,17 @@ int wpa_ether_send(void *ctx, const u8 *dest, u16 proto,
     os_memcpy(eth->h_source, gWpaSm.own_addr, ETH_ALEN);
     eth->h_proto = host_to_be16(proto);
 
-    esp_wifi_internal_tx(WIFI_IF_STA, buffer, sizeof(struct l2_ethhdr) + data_len);
-
-    return ESP_OK;
+    return esp_wifi_internal_tx(WIFI_IF_STA, buffer, sizeof(struct l2_ethhdr) + data_len);
 }
 
 int hostapd_send_eapol(const u8 *source, const u8 *sta_addr,
-		       const u8 *data, size_t data_len)
+                       const u8 *data, size_t data_len)
 {
     void *buffer = os_malloc(data_len + sizeof(struct l2_ethhdr));
     struct l2_ethhdr *eth = buffer;
 
-    if (!buffer){
-        wpa_printf( MSG_DEBUG, "send_eapol, buffer=%p\n", buffer);
+    if (!buffer) {
+        wpa_printf(MSG_DEBUG, "send_eapol, buffer=%p", buffer);
         return -1;
     }
 
@@ -93,6 +91,39 @@ int hostapd_send_eapol(const u8 *source, const u8 *sta_addr,
     os_free(buffer);
     return 0;
 
+}
+
+static void disable_wpa_wpa2(void)
+{
+    esp_wifi_sta_disable_wpa2_authmode_internal();
+}
+
+void wpa_supplicant_transition_disable(struct wpa_sm *sm, u8 bitmap)
+{
+    wpa_printf(MSG_DEBUG, "TRANSITION_DISABLE %02x", bitmap);
+
+    if ((bitmap & TRANSITION_DISABLE_WPA3_PERSONAL) &&
+            wpa_key_mgmt_sae(sm->key_mgmt)) {
+        disable_wpa_wpa2();
+    }
+
+    if ((bitmap & TRANSITION_DISABLE_SAE_PK) &&
+            wpa_key_mgmt_sae(sm->key_mgmt)) {
+        wpa_printf(MSG_INFO,
+                   "SAE-PK: SAE authentication without PK disabled based on AP notification");
+        disable_wpa_wpa2();
+        esp_wifi_enable_sae_pk_only_mode_internal();
+    }
+
+    if ((bitmap & TRANSITION_DISABLE_WPA3_ENTERPRISE) &&
+            wpa_key_mgmt_wpa_ieee8021x(sm->key_mgmt)) {
+        disable_wpa_wpa2();
+    }
+
+    if ((bitmap & TRANSITION_DISABLE_ENHANCED_OPEN) &&
+            wpa_key_mgmt_owe(sm->key_mgmt)) {
+        esp_wifi_sta_disable_owe_trans_internal();
+    }
 }
 
 u8 *wpa_sm_alloc_eapol(struct wpa_sm *sm, u8 type,
@@ -109,11 +140,10 @@ void wpa_sm_free_eapol(u8 *buffer)
 
 void  wpa_sm_deauthenticate(struct wpa_sm *sm, u8 reason_code)
 {
-
     /*only need send deauth frame when associated*/
     if (WPA_SM_STATE(sm) >= WPA_ASSOCIATED) {
         pmksa_cache_clear_current(sm);
-        sm->wpa_deauthenticate(reason_code);
+        wpa_deauthenticate(reason_code);
     }
 }
 

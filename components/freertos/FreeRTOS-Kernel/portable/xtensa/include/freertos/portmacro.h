@@ -1,14 +1,14 @@
 /*
- * SPDX-FileCopyrightText: 2017 Amazon.com, Inc. or its affiliates
- * SPDX-FileCopyrightText: 2015-2019 Cadence Design Systems, Inc.
+ * FreeRTOS Kernel V10.5.1
+ * Copyright (C) 2015-2019 Cadence Design Systems, Inc.
+ * Copyright (C) 2021 Amazon.com, Inc. or its affiliates.  All Rights Reserved.
+ *
+ * SPDX-FileCopyrightText: 2015-2019 Cadence Design Systems, Inc
+ * SPDX-FileCopyrightText: 2021 Amazon.com, Inc. or its affiliates
  *
  * SPDX-License-Identifier: MIT
  *
- * SPDX-FileContributor: 2016-2022 Espressif Systems (Shanghai) CO LTD
- */
-/*
- * FreeRTOS Kernel V10.4.3
- * Copyright (C) 2017 Amazon.com, Inc. or its affiliates.  All Rights Reserved.
+ * SPDX-FileContributor: 2023-2024 Espressif Systems (Shanghai) CO LTD
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of
  * this software and associated documentation files (the "Software"), to deal in
@@ -18,8 +18,7 @@
  * subject to the following conditions:
  *
  * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software. If you wish to use our Amazon
- * FreeRTOS name, please do so in a fair use way that does not cause confusion.
+ * copies or substantial portions of the Software.
  *
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
@@ -31,30 +30,6 @@
  * https://www.FreeRTOS.org
  * https://github.com/FreeRTOS
  *
- * 1 tab == 4 spaces!
- */
-
-/*
- * Copyright (c) 2015-2019 Cadence Design Systems, Inc.
- *
- * Permission is hereby granted, free of charge, to any person obtaining
- * a copy of this software and associated documentation files (the
- * "Software"), to deal in the Software without restriction, including
- * without limitation the rights to use, copy, modify, merge, publish,
- * distribute, sublicense, and/or sell copies of the Software, and to
- * permit persons to whom the Software is furnished to do so, subject to
- * the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
- * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
- * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
- * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
- * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
 #ifndef PORTMACRO_H
@@ -72,10 +47,11 @@
 #include <xtensa/xtruntime.h>       /* required for XTOS_SET_INTLEVEL. [refactor-todo] add common intr functions to esp_hw_support */
 #include "xt_instr_macros.h"
 #include "spinlock.h"
-#include "hal/cpu_hal.h"
 #include "esp_private/crosscore_int.h"
 #include "esp_macros.h"
 #include "esp_attr.h"
+#include "esp_cpu.h"
+#include "esp_memory_utils.h"
 #include "esp_newlib.h"             /* required for esp_reent_init() in tasks.c */
 #include "esp_heap_caps.h"
 #include "esp_rom_sys.h"
@@ -85,7 +61,7 @@
 /* [refactor-todo] These includes are not directly used in this file. They are kept into to prevent a breaking change. Remove these. */
 #include <limits.h>
 #include <xtensa/config/system.h>
-#include <xtensa/xtensa_api.h>
+#include <xtensa_api.h>
 
 /* [refactor-todo] introduce a port wrapper function to avoid including esp_timer.h into the public header */
 #if CONFIG_FREERTOS_RUN_TIME_STATS_USING_ESP_TIMER
@@ -138,7 +114,8 @@ typedef uint32_t TickType_t;
 #define portCRITICAL_NESTING_IN_TCB     0
 #define portSTACK_GROWTH                ( -1 )
 #define portTICK_PERIOD_MS              ( ( TickType_t ) 1000 / configTICK_RATE_HZ )
-#define portBYTE_ALIGNMENT              4
+#define portBYTE_ALIGNMENT              16    // Xtensa Windowed ABI requires the stack pointer to always be 16-byte aligned. See "isa_rm.pdf 8.1.1 Windowed Register Usage and Stack Layout"
+#define portTICK_TYPE_IS_ATOMIC         1
 #define portNOP()                       XT_NOP()
 
 
@@ -164,12 +141,9 @@ typedef uint32_t TickType_t;
 BaseType_t xPortInIsrContext(void);
 
 /**
- * @brief Asserts if in ISR context
+ * @brief Assert if in ISR context
  *
  * - Asserts on xPortInIsrContext() internally
- *
- * @note [refactor-todo] Check if this API is still required
- * @note [refactor-todo] Check if this should be inlined
  */
 void vPortAssertIfInISR(void);
 
@@ -195,7 +169,7 @@ BaseType_t xPortInterruptedFromISRContext(void);
 static inline UBaseType_t xPortSetInterruptMaskFromISR(void);
 
 /**
- * @brief Reenable interrupts in a nested manner (meant to be called from ISRs)
+ * @brief Re-enable interrupts in a nested manner (meant to be called from ISRs)
  *
  * @warning Only applies to current CPU.
  * @param prev_level Previous interrupt level
@@ -207,7 +181,7 @@ static inline void vPortClearInterruptMaskFromISR(UBaseType_t prev_level);
  * - See "Critical Sections & Disabling Interrupts" in docs/api-guides/freertos-smp.rst for more details
  * - Remark: For the ESP32, portENTER_CRITICAL and portENTER_CRITICAL_ISR both alias vPortEnterCritical, meaning that
  *           either function can be called both from ISR as well as task context. This is not standard FreeRTOS
- *           behaviorr; please keep this in mind if you need any compatibility with other FreeRTOS implementations.
+ *           behavior; please keep this in mind if you need any compatibility with other FreeRTOS implementations.
  * @note [refactor-todo] Check if these comments are still true
  * ------------------------------------------------------ */
 
@@ -363,7 +337,7 @@ void vPortYieldOtherCore(BaseType_t coreid);
  * @return true Core can yield
  * @return false Core cannot yield
  */
-static inline bool xPortCanYield(void);
+FORCE_INLINE_ATTR bool xPortCanYield(void);
 
 // ------------------- Hook Functions ----------------------
 
@@ -402,40 +376,21 @@ void vPortSetStackWatchpoint( void *pxStackStart );
  * @note [refactor-todo] IDF should call a FreeRTOS like macro instead of port function directly
  * @return BaseType_t Core ID
  */
-static inline BaseType_t xPortGetCoreID(void);
+FORCE_INLINE_ATTR BaseType_t xPortGetCoreID(void);
+
+// --------------------- TCB Cleanup -----------------------
 
 /**
- * @brief Wrapper for atomic compare-and-set instruction
+ * @brief TCB cleanup hook
  *
- * This subroutine will atomically compare *addr to 'compare'. If *addr == compare, *addr is set to *set. *set is
- * updated with the previous value of *addr (either 'compare' or some other value.)
+ * The portCLEAN_UP_TCB() macro is called in prvDeleteTCB() right before a
+ * deleted task's memory is freed. We map that macro to this internal function
+ * so that IDF FreeRTOS ports can inject some task pre-deletion operations.
  *
- * @warning From the ISA docs: in some (unspecified) cases, the s32c1i instruction may return the "bitwise inverse" of
- *          the old mem if the mem wasn't written. This doesn't seem to happen on the ESP32 (portMUX assertions would
- *          fail).
- *
- * @note [refactor-todo] Check if this can be deprecated
- * @note [refactor-todo] Check if this function should be renamed (due to void return type)
- *
- * @param[inout] addr Pointer to target address
- * @param[in] compare Compare value
- * @param[inout] set Pointer to set value
+ * @note We can't use vPortCleanUpTCB() due to API compatibility issues. See
+ * CONFIG_FREERTOS_ENABLE_STATIC_TASK_CLEAN_UP. Todo: IDF-8097
  */
-static inline void __attribute__((always_inline)) uxPortCompareSet(volatile uint32_t *addr, uint32_t compare, uint32_t *set);
-
-/**
- * @brief Wrapper for atomic compare-and-set instruction in external RAM
- *
- * Atomic compare-and-set but the target address is placed in external RAM
- *
- * @note [refactor-todo] Check if this can be deprecated
- *
- * @param[inout] addr Pointer to target address
- * @param[in] compare Compare value
- * @param[inout] set Pointer to set value
- */
-static inline void __attribute__((always_inline)) uxPortCompareSetExtram(volatile uint32_t *addr, uint32_t compare, uint32_t *set);
-
+void vPortTCBPreDeleteHook( void *pxTCB );
 
 
 /* ------------------------------------------- FreeRTOS Porting Interface ----------------------------------------------
@@ -444,19 +399,13 @@ static inline void __attribute__((always_inline)) uxPortCompareSetExtram(volatil
  * - Maps to forward declared functions
  * ------------------------------------------------------------------------------------------------------------------ */
 
-// ----------------------- Memory --------------------------
+// ----------------------- System --------------------------
 
-/**
- * @brief Task memory allocation macros
- *
- * @note Because the ROM routines don't necessarily handle a stack in external RAM correctly, we force the stack
- * memory to always be internal.
- * @note [refactor-todo] Update portable.h to match v10.4.3 to use new malloc prototypes
- */
-#define portTcbMemoryCaps               (MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)
-#define portStackMemoryCaps             (MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)
-#define pvPortMallocTcbMem(size)        heap_caps_malloc(size, portTcbMemoryCaps)
-#define pvPortMallocStackMem(size)      heap_caps_malloc(size, portStackMemoryCaps)
+#if ( configNUMBER_OF_CORES > 1 )
+    #define portGET_CORE_ID()       xPortGetCoreID()
+#else /* configNUMBER_OF_CORES > 1 */
+    #define portGET_CORE_ID()       ((BaseType_t) 0);
+#endif /* configNUMBER_OF_CORES > 1 */
 
 // --------------------- Interrupts ------------------------
 
@@ -475,7 +424,17 @@ static inline void __attribute__((always_inline)) uxPortCompareSetExtram(volatil
 #define portSET_INTERRUPT_MASK_FROM_ISR()                   xPortSetInterruptMaskFromISR()
 #define portCLEAR_INTERRUPT_MASK_FROM_ISR(prev_level)       vPortClearInterruptMaskFromISR(prev_level)
 
+/**
+ * @brief Assert if in ISR context
+ */
 #define portASSERT_IF_IN_ISR() vPortAssertIfInISR()
+
+/**
+ * @brief Used by FreeRTOS functions to call the correct version of critical section API
+ */
+#if ( configNUM_CORES > 1 )
+#define portCHECK_IF_IN_ISR()   xPortInIsrContext()
+#endif
 
 // ------------------ Critical Sections --------------------
 
@@ -501,7 +460,7 @@ static inline void __attribute__((always_inline)) uxPortCompareSetExtram(volatil
 #define portENTER_CRITICAL_ISR(mux)                 vPortEnterCritical(mux)
 #define portEXIT_CRITICAL_ISR(mux)                  vPortExitCritical(mux)
 
-#define portTRY_ENTER_CRITICAL_SAFE(mux, timeout)   xPortEnterCriticalTimeoutSafe(mux)
+#define portTRY_ENTER_CRITICAL_SAFE(mux, timeout)   xPortEnterCriticalTimeoutSafe(mux, timeout)
 #define portENTER_CRITICAL_SAFE(mux)                vPortEnterCriticalSafe(mux)
 #define portEXIT_CRITICAL_SAFE(mux)                 vPortExitCriticalSafe(mux)
 
@@ -542,6 +501,10 @@ extern void _frxt_setup_switch( void );     //Defined in portasm.S
 */
 #define portYIELD_WITHIN_API() esp_crosscore_int_send_yield(xPortGetCoreID())
 
+#if ( configNUMBER_OF_CORES > 1 )
+    #define portYIELD_CORE( xCoreID )     vPortYieldOtherCore( xCoreID )
+#endif /* configNUMBER_OF_CORES > 1 */
+
 // ------------------- Hook Functions ----------------------
 
 #define portSUPPRESS_TICKS_AND_SLEEP(idleTime) vApplicationSleep(idleTime)
@@ -550,15 +513,15 @@ extern void _frxt_setup_switch( void );     //Defined in portasm.S
 
 #define portCONFIGURE_TIMER_FOR_RUN_TIME_STATS()
 
-/**
- * - Fine resolution uses ccount
- * - ALT is coarse and uses esp_timer
- * @note [refactor-todo] Make fine and alt timers mutually exclusive
- */
-#define portGET_RUN_TIME_COUNTER_VALUE() xthal_get_ccount()
 #ifdef CONFIG_FREERTOS_RUN_TIME_STATS_USING_ESP_TIMER
-#define portALT_GET_RUN_TIME_COUNTER_VALUE(x) do {x = (uint32_t)esp_timer_get_time();} while(0)
-#endif
+#define portGET_RUN_TIME_COUNTER_VALUE()        ((configRUN_TIME_COUNTER_TYPE) esp_timer_get_time())
+#else // Uses CCOUNT
+#define portGET_RUN_TIME_COUNTER_VALUE()        ((configRUN_TIME_COUNTER_TYPE) xthal_get_ccount())
+#endif // CONFIG_FREERTOS_RUN_TIME_STATS_USING_ESP_TIMER
+
+// --------------------- TCB Cleanup -----------------------
+
+#define portCLEAN_UP_TCB( pxTCB ) vPortTCBPreDeleteHook( pxTCB )
 
 // -------------- Optimized Task Selection -----------------
 
@@ -636,7 +599,7 @@ static inline void __attribute__((always_inline)) vPortExitCriticalSafe(portMUX_
 
 // ---------------------- Yielding -------------------------
 
-static inline bool IRAM_ATTR xPortCanYield(void)
+FORCE_INLINE_ATTR bool xPortCanYield(void)
 {
     uint32_t ps_reg = 0;
 
@@ -655,78 +618,35 @@ static inline bool IRAM_ATTR xPortCanYield(void)
 
 // ----------------------- System --------------------------
 
-static inline BaseType_t IRAM_ATTR xPortGetCoreID(void)
+FORCE_INLINE_ATTR BaseType_t xPortGetCoreID(void)
 {
-    return (BaseType_t) cpu_hal_get_core_id();
-}
-
-static inline void __attribute__((always_inline)) uxPortCompareSet(volatile uint32_t *addr, uint32_t compare, uint32_t *set)
-{
-    compare_and_set_native(addr, compare, set);
-}
-
-static inline void __attribute__((always_inline)) uxPortCompareSetExtram(volatile uint32_t *addr, uint32_t compare, uint32_t *set)
-{
-#ifdef CONFIG_SPIRAM
-    compare_and_set_extram(addr, compare, set);
-#endif
+    return (BaseType_t) esp_cpu_get_core_id();
 }
 
 
 
 /* ------------------------------------------------------ Misc ---------------------------------------------------------
  * - Miscellaneous porting macros
- * - These are not port of the FreeRTOS porting interface, but are used by other FreeRTOS dependent components
- * - [refactor-todo] Remove dependency on MPU wrappers by modifying TCB
+ * - These are not part of the FreeRTOS porting interface, but are used by other FreeRTOS dependent components
  * ------------------------------------------------------------------------------------------------------------------ */
-
-// -------------------- Co-Processor -----------------------
-
-// When coprocessors are defined, we maintain a pointer to coprocessors area.
-// We currently use a hack: redefine field xMPU_SETTINGS in TCB block as a structure that can hold:
-// MPU wrappers, coprocessor area pointer, trace code structure, and more if needed.
-// The field is normally used for memory protection. FreeRTOS should create another general purpose field.
-typedef struct {
-#if XCHAL_CP_NUM > 0
-    volatile StackType_t *coproc_area; // Pointer to coprocessor save area; MUST BE FIRST
-#endif
-
-#if portUSING_MPU_WRAPPERS
-    // Define here mpu_settings, which is port dependent
-    int mpu_setting; // Just a dummy example here; MPU not ported to Xtensa yet
-#endif
-} xMPU_SETTINGS;
-
-// Main hack to use MPU_wrappers even when no MPU is defined (warning: mpu_setting should not be accessed; otherwise move this above xMPU_SETTINGS)
-#if (XCHAL_CP_NUM > 0) && !portUSING_MPU_WRAPPERS   // If MPU wrappers not used, we still need to allocate coproc area
-#undef portUSING_MPU_WRAPPERS
-#define portUSING_MPU_WRAPPERS 1   // Enable it to allocate coproc area
-#define MPU_WRAPPERS_H             // Override mpu_wrapper.h to disable unwanted code
-#define PRIVILEGED_FUNCTION
-#define PRIVILEGED_DATA
-#endif
-
-void _xt_coproc_release(volatile void *coproc_sa_base);
-
-/*
- * The structures and methods of manipulating the MPU are contained within the
- * port layer.
- *
- * Fills the xMPUSettings structure with the memory region information
- * contained in xRegions.
- */
-#if( portUSING_MPU_WRAPPERS == 1 )
-struct xMEMORY_REGION;
-void vPortStoreTaskMPUSettings( xMPU_SETTINGS *xMPUSettings, const struct xMEMORY_REGION *const xRegions, StackType_t *pxBottomOfStack, uint32_t usStackDepth ) PRIVILEGED_FUNCTION;
-void vPortReleaseTaskMPUSettings( xMPU_SETTINGS *xMPUSettings );
-#endif
 
 // -------------------- Heap Related -----------------------
 
 /**
+ * @brief Checks if a given piece of memory can be used to store a FreeRTOS list
+ *
+ * - Defined in heap_idf.c
+ *
+ * @param ptr Pointer to memory
+ * @return true Memory can be used to store a List
+ * @return false Otherwise
+ */
+bool xPortCheckValidListMem(const void *ptr);
+
+/**
  * @brief Checks if a given piece of memory can be used to store a task's TCB
  *
- * - Defined in port_common.c
+ * - Defined in heap_idf.c
  *
  * @param ptr Pointer to memory
  * @return true Memory can be used to store a TCB
@@ -737,7 +657,7 @@ bool xPortCheckValidTCBMem(const void *ptr);
 /**
  * @brief Checks if a given piece of memory can be used to store a task's stack
  *
- * - Defined in port_common.c
+ * - Defined in heap_idf.c
  *
  * @param ptr Pointer to memory
  * @return true Memory can be used to store a task stack
@@ -745,24 +665,17 @@ bool xPortCheckValidTCBMem(const void *ptr);
  */
 bool xPortcheckValidStackMem(const void *ptr);
 
-#define portVALID_TCB_MEM(ptr) xPortCheckValidTCBMem(ptr)
-#define portVALID_STACK_MEM(ptr) xPortcheckValidStackMem(ptr)
+#define portVALID_LIST_MEM(ptr)     xPortCheckValidListMem(ptr)
+#define portVALID_TCB_MEM(ptr)      xPortCheckValidTCBMem(ptr)
+#define portVALID_STACK_MEM(ptr)    xPortcheckValidStackMem(ptr)
 
 // --------------------- App-Trace -------------------------
 
 #if CONFIG_APPTRACE_SV_ENABLE
-extern uint32_t port_switch_flag[];
+extern volatile uint32_t port_switch_flag[portNUM_PROCESSORS];
 #define os_task_switch_is_pended(_cpu_) (port_switch_flag[_cpu_])
 #else
 #define os_task_switch_is_pended(_cpu_) (false)
-#endif
-
-// --------------------- Debugging -------------------------
-
-#if CONFIG_FREERTOS_ASSERT_ON_UNTESTED_FUNCTION
-#define UNTESTED_FUNCTION() { esp_rom_printf("Untested FreeRTOS function %s\r\n", __FUNCTION__); configASSERT(false); } while(0)
-#else
-#define UNTESTED_FUNCTION()
 #endif
 
 #ifdef __cplusplus

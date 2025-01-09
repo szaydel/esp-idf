@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# SPDX-FileCopyrightText: 2019-2022 Espressif Systems (Shanghai) CO LTD
+# SPDX-FileCopyrightText: 2019-2024 Espressif Systems (Shanghai) CO LTD
 #
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -8,24 +8,29 @@
 #
 # You don't have to use idf.py, you can use cmake directly
 # (or use cmake in an IDE)
-
 # WARNING: we don't check for Python build-time dependencies until
 # check_environment() function below. If possible, avoid importing
 # any external libraries here - put in external script, or import in
 # their specific function instead.
-from __future__ import print_function
-
 import codecs
+import glob
 import json
 import locale
-import os
 import os.path
-import signal
+import shlex
 import subprocess
 import sys
-from collections import Counter, OrderedDict
+from collections import Counter
+from collections import OrderedDict
+from collections.abc import KeysView
 from importlib import import_module
 from pkgutil import iter_modules
+from typing import Any
+from typing import Callable
+from typing import Dict
+from typing import List
+from typing import Optional
+from typing import Union
 
 # pyc files remain in the filesystem when switching between branches which might raise errors for incompatible
 # idf.py extensions. Therefore, pyc file generation is turned off:
@@ -35,10 +40,25 @@ import python_version_checker  # noqa: E402
 
 try:
     from idf_py_actions.errors import FatalError  # noqa: E402
-    from idf_py_actions.tools import executable_exists, idf_version, merge_action_lists, realpath  # noqa: E402
-except ImportError:
-    # For example, importing click could cause this.
-    print('Please use idf.py only in an ESP-IDF shell environment.', file=sys.stderr)
+    from idf_py_actions.tools import (PROG, SHELL_COMPLETE_RUN, SHELL_COMPLETE_VAR, PropertyDict,  # noqa: E402
+                                      debug_print_idf_version, get_target, merge_action_lists, print_warning)
+    if os.getenv('IDF_COMPONENT_MANAGER') != '0':
+        from idf_component_manager import idf_extensions
+except ImportError as e:
+    print((f'{e}\n'
+           f'This usually means that "idf.py" was not '
+           f'spawned within an ESP-IDF shell environment or the python virtual '
+           f'environment used by "idf.py" is corrupted.\n'
+           f'Please use idf.py only in an ESP-IDF shell environment. If problem persists, '
+           f'please try to install ESP-IDF tools again as described in the Get Started guide.'),
+          file=sys.stderr)
+    if e.name is None:
+        # The ImportError or ModuleNotFoundError might be raised without
+        # specifying a module name. In this not so common situation, re-raise
+        # the exception to print all the information that could assist in
+        # identifying the problem.
+        raise
+
     sys.exit(1)
 
 # Use this Python interpreter for any subprocesses we launch
@@ -48,25 +68,8 @@ PYTHON = sys.executable
 # you have to pass env=os.environ explicitly anywhere that we create a process
 os.environ['PYTHON'] = sys.executable
 
-# Name of the program, normally 'idf.py'.
-# Can be overridden from idf.bat using IDF_PY_PROGRAM_NAME
-PROG = os.getenv('IDF_PY_PROGRAM_NAME', 'idf.py')
 
-# environment variable used during click shell completion run
-SHELL_COMPLETE_VAR = '_IDF.PY_COMPLETE'
-
-# was shell completion invoked?
-SHELL_COMPLETE_RUN = SHELL_COMPLETE_VAR in os.environ
-
-
-# function prints warning when autocompletion is not being performed
-# set argument stream to sys.stderr for errors and exceptions
-def print_warning(message, stream=None):
-    if not SHELL_COMPLETE_RUN:
-        print(message, file=stream or sys.stderr)
-
-
-def check_environment():
+def check_environment() -> List:
     """
     Verify the environment contains the top-level tools we need to operate
 
@@ -74,15 +77,11 @@ def check_environment():
     """
     checks_output = []
 
-    if not executable_exists(['cmake', '--version']):
-        debug_print_idf_version()
-        raise FatalError("'cmake' must be available on the PATH to use %s" % PROG)
-
     # verify that IDF_PATH env variable is set
     # find the directory idf.py is in, then the parent directory of this, and assume this is IDF_PATH
-    detected_idf_path = realpath(os.path.join(os.path.dirname(__file__), '..'))
+    detected_idf_path = os.path.realpath(os.path.join(os.path.dirname(__file__), '..'))
     if 'IDF_PATH' in os.environ:
-        set_idf_path = realpath(os.environ['IDF_PATH'])
+        set_idf_path = os.path.realpath(os.environ['IDF_PATH'])
         if set_idf_path != detected_idf_path:
             print_warning(
                 'WARNING: IDF_PATH environment variable is set to %s but %s path indicates IDF directory %s. '
@@ -118,10 +117,19 @@ def check_environment():
         debug_print_idf_version()
         raise SystemExit(1)
 
+    # Check used Python interpreter
+    checks_output.append('Checking used Python interpreter...')
+    try:
+        python_venv_path = os.environ['IDF_PYTHON_ENV_PATH']
+        if python_venv_path and not sys.executable.startswith(python_venv_path):
+            print_warning(f'WARNING: Python interpreter "{sys.executable}" used to start idf.py is not from installed venv "{python_venv_path}"')
+    except KeyError:
+        print_warning('WARNING: The IDF_PYTHON_ENV_PATH is missing in environmental variables!')
+
     return checks_output
 
 
-def _safe_relpath(path, start=None):
+def _safe_relpath(path: str, start: Optional[str]=None) -> str:
     """ Return a relative path, same as os.path.relpath, but only if this is possible.
 
     It is not possible on Windows, if the start directory and the path are on different drives.
@@ -132,38 +140,14 @@ def _safe_relpath(path, start=None):
         return os.path.abspath(path)
 
 
-def debug_print_idf_version():
-    version = idf_version()
-    if version:
-        print_warning('ESP-IDF %s' % version)
-    else:
-        print_warning('ESP-IDF version unknown')
-
-
-class PropertyDict(dict):
-    def __getattr__(self, name):
-        if name in self:
-            return self[name]
-        else:
-            raise AttributeError("'PropertyDict' object has no attribute '%s'" % name)
-
-    def __setattr__(self, name, value):
-        self[name] = value
-
-    def __delattr__(self, name):
-        if name in self:
-            del self[name]
-        else:
-            raise AttributeError("'PropertyDict' object has no attribute '%s'" % name)
-
-
-def init_cli(verbose_output=None):
+def init_cli(verbose_output: Optional[List]=None) -> Any:
     # Click is imported here to run it after check_environment()
     import click
+    from click.shell_completion import CompletionItem
 
     class Deprecation(object):
         """Construct deprecation notice for help messages"""
-        def __init__(self, deprecated=False):
+        def __init__(self, deprecated: Union[Dict, str, bool]=False) -> None:
             self.deprecated = deprecated
             self.since = None
             self.removed = None
@@ -178,7 +162,7 @@ def init_cli(verbose_output=None):
             elif isinstance(deprecated, str):
                 self.custom_message = deprecated
 
-        def full_message(self, type='Option'):
+        def full_message(self, type: str='Option') -> str:
             if self.exit_with_error:
                 return '%s is deprecated %sand was removed%s.%s' % (
                     type,
@@ -194,15 +178,15 @@ def init_cli(verbose_output=None):
                     ' %s' % self.custom_message if self.custom_message else '',
                 )
 
-        def help(self, text, type='Option', separator=' '):
+        def help(self, text: str, type: str='Option', separator: str=' ') -> str:
             text = text or ''
             return self.full_message(type) + separator + text if self.deprecated else text
 
-        def short_help(self, text):
+        def short_help(self, text: str) -> str:
             text = text or ''
             return ('Deprecated! ' + text) if self.deprecated else text
 
-    def check_deprecation(ctx):
+    def check_deprecation(ctx: click.core.Context) -> None:
         """Prints deprecation warnings for arguments in given context"""
         for option in ctx.command.params:
             default = () if option.multiple else option.default
@@ -214,7 +198,8 @@ def init_cli(verbose_output=None):
                     print_warning('Warning: %s' % deprecation.full_message('Option "%s"' % option.name))
 
     class Task(object):
-        def __init__(self, callback, name, aliases, dependencies, order_dependencies, action_args):
+        def __init__(self, callback: Callable, name: str, aliases: List, dependencies: Optional[List],
+                     order_dependencies: Optional[List], action_args: Dict) -> None:
             self.callback = callback
             self.name = name
             self.dependencies = dependencies
@@ -222,7 +207,7 @@ def init_cli(verbose_output=None):
             self.action_args = action_args
             self.aliases = aliases
 
-        def __call__(self, context, global_args, action_args=None):
+        def __call__(self, context: click.core.Context, global_args: PropertyDict, action_args: Optional[Dict]=None) -> None:
             if action_args is None:
                 action_args = self.action_args
 
@@ -231,26 +216,24 @@ def init_cli(verbose_output=None):
     class Action(click.Command):
         def __init__(
                 self,
-                name=None,
-                aliases=None,
-                deprecated=False,
-                dependencies=None,
-                order_dependencies=None,
-                hidden=False,
-                **kwargs):
+                name: Optional[str]=None,
+                aliases: Optional[List]=None,
+                deprecated: Union[Dict, str, bool]=False,
+                dependencies: Optional[List]=None,
+                order_dependencies: Optional[List]=None,
+                hidden: bool=False,
+                **kwargs: Any) -> None:
             super(Action, self).__init__(name, **kwargs)
 
-            self.name = self.name or self.callback.__name__
-            self.deprecated = deprecated
-            self.hidden = hidden
+            self.name: str = self.name or self.callback.__name__
+            self.deprecated: Union[Dict, str, bool] = deprecated
+            self.hidden: bool = hidden
 
             if aliases is None:
                 aliases = []
             self.aliases = aliases
 
-            self.help = self.help or self.callback.__doc__
-            if self.help is None:
-                self.help = ''
+            self.help: str = self.help or self.callback.__doc__ or ''
 
             if dependencies is None:
                 dependencies = []
@@ -259,7 +242,7 @@ def init_cli(verbose_output=None):
                 order_dependencies = []
 
             # Show first line of help if short help is missing
-            self.short_help = self.short_help or self.help.split('\n')[0]
+            self.short_help: str = self.short_help or self.help.split('\n')[0]
 
             if deprecated:
                 deprecation = Deprecation(deprecated)
@@ -276,7 +259,7 @@ def init_cli(verbose_output=None):
             self.unwrapped_callback = self.callback
             if self.callback is not None:
 
-                def wrapped_callback(**action_args):
+                def wrapped_callback(**action_args: Any) -> Task:
                     return Task(
                         callback=self.unwrapped_callback,
                         name=self.name,
@@ -288,7 +271,7 @@ def init_cli(verbose_output=None):
 
                 self.callback = wrapped_callback
 
-        def invoke(self, ctx):
+        def invoke(self, ctx: click.core.Context) -> click.core.Context:
             if self.deprecated:
                 deprecation = Deprecation(self.deprecated)
                 message = deprecation.full_message('Command "%s"' % self.name)
@@ -310,7 +293,7 @@ def init_cli(verbose_output=None):
 
         names - alias of 'param_decls'
         """
-        def __init__(self, **kwargs):
+        def __init__(self, **kwargs: str):
             names = kwargs.pop('names')
             super(Argument, self).__init__(names, **kwargs)
 
@@ -325,7 +308,7 @@ def init_cli(verbose_output=None):
 
         SCOPES = ('default', 'global', 'shared')
 
-        def __init__(self, scope=None):
+        def __init__(self, scope: Optional[Union['Scope', str]]=None) -> None:  # noqa: F821
             if scope is None:
                 self._scope = 'default'
             elif isinstance(scope, str) and scope in self.SCOPES:
@@ -336,19 +319,19 @@ def init_cli(verbose_output=None):
                 raise FatalError('Unknown scope for option: %s' % scope)
 
         @property
-        def is_global(self):
+        def is_global(self) -> bool:
             return self._scope == 'global'
 
         @property
-        def is_shared(self):
+        def is_shared(self) -> bool:
             return self._scope == 'shared'
 
-        def __str__(self):
+        def __str__(self) -> str:
             return self._scope
 
     class Option(click.Option):
         """Option that knows whether it should be global"""
-        def __init__(self, scope=None, deprecated=False, hidden=False, **kwargs):
+        def __init__(self, scope: Optional[Union[Scope, str]]=None, deprecated: Union[Dict, str, bool]=False, hidden: bool=False, **kwargs: str) -> None:
             """
             Keyword arguments additional to Click's Option class:
 
@@ -369,7 +352,7 @@ def init_cli(verbose_output=None):
 
             if deprecated:
                 deprecation = Deprecation(deprecated)
-                self.help = deprecation.help(self.help)
+                self.help: str = deprecation.help(self.help)
 
             if self.envvar:
                 self.help += ' The default value can be set with the %s environment variable.' % self.envvar
@@ -377,20 +360,21 @@ def init_cli(verbose_output=None):
             if self.scope.is_global:
                 self.help += ' This option can be used at most once either globally, or for one subcommand.'
 
-        def get_help_record(self, ctx):
+        def get_help_record(self, ctx: click.core.Context) -> Any:
             # Backport "hidden" parameter to click 5.0
             if self.hidden:
-                return
+                return None
 
             return super(Option, self).get_help_record(ctx)
 
     class CLI(click.MultiCommand):
         """Action list contains all actions with options available for CLI"""
-        def __init__(self, all_actions=None, verbose_output=None, help=None):
+        def __init__(self, all_actions: Optional[Dict]=None, verbose_output: Optional[List]=None, help: Optional[str]=None) -> None:
             super(CLI, self).__init__(
                 chain=True,
                 invoke_without_command=True,
                 result_callback=self.execute_tasks,
+                no_args_is_help=True,
                 context_settings={'max_content_width': 140},
                 help=help,
             )
@@ -455,21 +439,38 @@ def init_cli(verbose_output=None):
 
                     self._actions[name].params.append(option)
 
-        def list_commands(self, ctx):
+        def list_commands(self, ctx: click.core.Context) -> List:
             return sorted(filter(lambda name: not self._actions[name].hidden, self._actions))
 
-        def get_command(self, ctx, name):
+        def get_command(self, ctx: click.core.Context, name: str) -> Optional[Action]:
             if name in self.commands_with_aliases:
                 return self._actions.get(self.commands_with_aliases.get(name))
 
             # Trying fallback to build target (from "all" action) if command is not known
             else:
-                return Action(name=name, callback=self._actions.get('fallback').unwrapped_callback)
+                callback = self._actions.get('fallback')
+                if callback:
+                    return Action(name=name, callback=callback.unwrapped_callback)
+                return None
 
-        def _print_closing_message(self, args, actions):
-            # print a closing message of some kind
-            #
-            if any(t in str(actions) for t in ('flash', 'dfu', 'uf2', 'uf2-app')):
+        def shell_complete(self, ctx: click.core.Context, incomplete: str) -> List[CompletionItem]:
+            # Enable @-argument completion in bash only if @ is not present in
+            # COMP_WORDBREAKS. When @ is included, the @-argument is not considered
+            # part of the completion word, causing @-argument completion to function
+            # unreliably in bash.
+            complete_file = ('bash' not in os.environ.get('_IDF.PY_COMPLETE', '') or
+                             '@' not in os.environ.get('IDF_PY_COMP_WORDBREAKS', ''))
+            if incomplete.startswith('@') and complete_file:
+                path_prefix = incomplete[1:]
+                candidates = glob.glob(path_prefix + '*')
+                result = [CompletionItem(f'@{c}') for c in candidates]
+                return result
+            return super(CLI, self).shell_complete(ctx, incomplete)  # type: ignore
+
+        def _print_closing_message(self, args: PropertyDict, actions: KeysView) -> None:
+            # print a closing message of some kind,
+            # except if any of the following actions were requested
+            if any(t in str(actions) for t in ('flash', 'dfu', 'uf2', 'uf2-app', 'qemu')):
                 print('Done')
                 return
 
@@ -479,11 +480,13 @@ def init_cli(verbose_output=None):
 
             # Otherwise, if we built any binaries print a message about
             # how to flash them
-            def print_flashing_message(title, key):
-                with open(os.path.join(args.build_dir, 'flasher_args.json')) as f:
-                    flasher_args = json.load(f)
+            def print_flashing_message(title: str, key: str) -> None:
+                with open(os.path.join(args.build_dir, 'flasher_args.json'), encoding='utf-8') as file:
+                    flasher_args: Dict[str, Any] = json.load(file)
 
-                def flasher_path(f):
+                def flasher_path(f: Union[str, 'os.PathLike[str]']) -> str:
+                    if type(args.build_dir) is bytes:
+                        args.build_dir = args.build_dir.decode()
                     return _safe_relpath(os.path.join(args.build_dir, f))
 
                 if key != 'project':  # flashing a single item
@@ -506,25 +509,35 @@ def init_cli(verbose_output=None):
                     for o, f in flash_items:
                         cmd += o + ' ' + flasher_path(f) + ' '
 
-                print('\n%s build complete. To flash, run this command:' % title)
+                flash_target = 'flash' if key == 'project' else f'{key}-flash'
+                print(f'{os.linesep}{title} build complete. To flash, run:')
+                print(f' idf.py {flash_target}')
+                if args.port:
+                    print('or')
+                    print(f' idf.py -p {args.port} {flash_target}')
+                print('or')
+                print(f' idf.py -p PORT {flash_target}')
 
-                print(
-                    '%s %s -p %s -b %s --before %s --after %s --chip %s %s write_flash %s' % (
-                        PYTHON,
-                        _safe_relpath('%s/components/esptool_py/esptool/esptool.py' % os.environ['IDF_PATH']),
-                        args.port or '(PORT)',
-                        args.baud,
-                        flasher_args['extra_esptool_args']['before'],
-                        flasher_args['extra_esptool_args']['after'],
-                        flasher_args['extra_esptool_args']['chip'],
-                        '--no-stub' if not flasher_args['extra_esptool_args']['stub'] else '',
-                        cmd.strip(),
-                    ))
-                print(
-                    "or run 'idf.py -p %s %s'" % (
-                        args.port or '(PORT)',
-                        key + '-flash' if key != 'project' else 'flash',
-                    ))
+                esptool_cmd = ['python -m esptool',
+                               '--chip {}'.format(flasher_args['extra_esptool_args']['chip']),
+                               f'-b {args.baud}',
+                               '--before {}'.format(flasher_args['extra_esptool_args']['before']),
+                               '--after {}'.format(flasher_args['extra_esptool_args']['after'])]
+
+                if not flasher_args['extra_esptool_args']['stub']:
+                    esptool_cmd += ['--no-stub']
+
+                if args.port:
+                    esptool_cmd += [f'-p {args.port}']
+
+                esptool_cmd += ['write_flash']
+
+                print('or')
+                print(' {}'.format(' '.join(esptool_cmd + [cmd.strip()])))
+
+                if os.path.exists(os.path.join(args.build_dir, 'flash_args')):
+                    print(f'or from the "{args.build_dir}" directory')
+                    print(' {}'.format(' '.join(esptool_cmd + ['"@flash_args"'])))
 
             if 'all' in actions or 'build' in actions:
                 print_flashing_message('Project', 'project')
@@ -536,13 +549,9 @@ def init_cli(verbose_output=None):
                 if 'bootloader' in actions:
                     print_flashing_message('Bootloader', 'bootloader')
 
-        def execute_tasks(self, tasks, **kwargs):
+        def execute_tasks(self, tasks: List, **kwargs: str) -> OrderedDict:
             ctx = click.get_current_context()
             global_args = PropertyDict(kwargs)
-
-            def _help_and_exit():
-                print(ctx.get_help())
-                ctx.exit()
 
             # Show warning if some tasks are present several times in the list
             dupplicated_tasks = sorted(
@@ -556,10 +565,6 @@ def init_cli(verbose_output=None):
                     'Only first occurrence will be executed.')
 
             for task in tasks:
-                # Show help and exit if help is in the list of commands
-                if task.name == 'help':
-                    _help_and_exit()
-
                 # Set propagated global options.
                 # These options may be set on one subcommand, but available in the list of global arguments
                 for key in list(task.action_args):
@@ -571,9 +576,14 @@ def init_cli(verbose_output=None):
                         default = () if option.multiple else option.default
 
                         if global_value != default and local_value != default and global_value != local_value:
-                            raise FatalError(
-                                'Option "%s" provided for "%s" is already defined to a different value. '
-                                'This option can appear at most once in the command line.' % (key, task.name))
+                            if hasattr(option, 'envvar') and option.envvar and os.getenv(option.envvar) != default:
+                                msg = (f'This option cannot be set in command line if the {option.envvar} '
+                                       'environment variable is set to a different value.')
+                            else:
+                                msg = 'This option can appear at most once in the command line.'
+
+                            raise FatalError(f'Option "{key}" provided for "{task.name}" is already defined to '
+                                             f'a different value. {msg}')
                         if local_value != default:
                             global_args[key] = local_value
 
@@ -587,19 +597,15 @@ def init_cli(verbose_output=None):
             for action_callback in ctx.command.global_action_callbacks:
                 action_callback(ctx, global_args, tasks)
 
-            # Always show help when command is not provided
-            if not tasks:
-                _help_and_exit()
-
             # Build full list of tasks to and deal with dependencies and order dependencies
-            tasks_to_run = OrderedDict()
+            tasks_to_run: OrderedDict = OrderedDict()
             while tasks:
                 task = tasks[0]
                 tasks_dict = dict([(t.name, t) for t in tasks])
 
                 dependecies_processed = True
 
-                # If task have some dependecies they have to be executed before the task.
+                # If task have some dependencies they have to be executed before the task.
                 for dep in task.dependencies:
                     if dep not in tasks_to_run.keys():
                         # If dependent task is in the list of unprocessed tasks move to the front of the list
@@ -644,7 +650,9 @@ def init_cli(verbose_output=None):
                     if task.aliases:
                         name_with_aliases += ' (aliases: %s)' % ', '.join(task.aliases)
 
-                    print('Executing action: %s' % name_with_aliases)
+                    # When machine-readable json format for help is printed, don't show info about executing action so the output is deserializable
+                    if name_with_aliases != 'help' or not task.action_args.get('json_option', False):
+                        print('Executing action: %s' % name_with_aliases)
                     task(ctx, global_args, task.action_args)
 
                 self._print_closing_message(global_args, tasks_to_run.keys())
@@ -661,20 +669,20 @@ def init_cli(verbose_output=None):
         },
     )
     @click.option('-C', '--project-dir', default=os.getcwd(), type=click.Path())
-    def parse_project_dir(project_dir):
-        return realpath(project_dir)
+    def parse_project_dir(project_dir: str) -> Any:
+        return os.path.realpath(project_dir)
 
     # Set `complete_var` to not existing environment variable name to prevent early cmd completion
     project_dir = parse_project_dir(standalone_mode=False, complete_var='_IDF.PY_COMPLETE_NOT_EXISTING')
 
-    all_actions = {}
+    all_actions: Dict = {}
     # Load extensions from components dir
     idf_py_extensions_path = os.path.join(os.environ['IDF_PATH'], 'tools', 'idf_py_actions')
-    extension_dirs = [realpath(idf_py_extensions_path)]
+    extension_dirs = [os.path.realpath(idf_py_extensions_path)]
     extra_paths = os.environ.get('IDF_EXTRA_ACTIONS_PATH')
     if extra_paths is not None:
         for path in extra_paths.split(';'):
-            path = realpath(path)
+            path = os.path.realpath(path)
             if path not in extension_dirs:
                 extension_dirs.append(path)
 
@@ -691,7 +699,6 @@ def init_cli(verbose_output=None):
 
     # Load component manager idf.py extensions if not explicitly disabled
     if os.getenv('IDF_COMPONENT_MANAGER') != '0':
-        from idf_component_manager import idf_extensions
         extensions.append(('component_manager_ext', idf_extensions))
 
     # Optional load `pyclang` for additional clang-tidy related functionalities
@@ -725,22 +732,21 @@ def init_cli(verbose_output=None):
 
     cli_help = (
         'ESP-IDF CLI build management tool. '
-        'For commands that are not known to idf.py an attempt to execute it as a build system target will be made.')
+        'For commands that are not known to idf.py an attempt to execute it as a build system target will be made. '
+        'Selected target: {}'.format(get_target(project_dir)))
 
     return CLI(help=cli_help, verbose_output=verbose_output, all_actions=all_actions)
 
 
-def signal_handler(_signal, _frame):
-    # The Ctrl+C processed by other threads inside
-    pass
-
-
-def main():
-    # Processing of Ctrl+C event for all threads made by main()
-    signal.signal(signal.SIGINT, signal_handler)
-
+def main(argv: Optional[List[Any]] = None) -> None:
     # Check the environment only when idf.py is invoked regularly from command line.
     checks_output = None if SHELL_COMPLETE_RUN else check_environment()
+
+    # Check existence of the current working directory to prevent exceptions from click cli.
+    try:
+        os.getcwd()
+    except FileNotFoundError as e:
+        raise FatalError(f'ERROR: {e}. Working directory cannot be established. Check its existence.')
 
     try:
         cli = init_cli(verbose_output=checks_output)
@@ -750,10 +756,57 @@ def main():
         else:
             raise
     else:
-        cli(sys.argv[1:], prog_name=PROG, complete_var=SHELL_COMPLETE_VAR)
+        argv = expand_file_arguments(argv or sys.argv[1:])
+
+        cli(argv, prog_name=PROG, complete_var=SHELL_COMPLETE_VAR)
 
 
-def _valid_unicode_config():
+def expand_file_arguments(argv: List[Any]) -> List[Any]:
+    """
+    Any argument starting with "@" gets replaced with all values read from a text file.
+    Text file arguments can be split by newline or by space.
+    Values are added "as-is", as if they were specified in this order
+    on the command line.
+    """
+    visited = set()
+    expanded = False
+
+    def expand_args(args: List[Any], parent_path: str, file_stack: List[str]) -> List[str]:
+        expanded_args = []
+        for arg in args:
+            if not arg.startswith('@'):
+                expanded_args.append(arg)
+            else:
+                nonlocal expanded, visited
+                expanded = True
+
+                file_name = arg[1:]
+                rel_path = os.path.normpath(os.path.join(parent_path, file_name))
+
+                if rel_path in visited:
+                    file_stack_str = ' -> '.join(['@' + f for f in file_stack + [file_name]])
+                    raise FatalError(f'Circular dependency in file argument expansion: {file_stack_str}')
+                visited.add(rel_path)
+
+                try:
+                    with open(rel_path, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            expanded_args.extend(expand_args(shlex.split(line), os.path.dirname(rel_path), file_stack + [file_name]))
+                except IOError:
+                    file_stack_str = ' -> '.join(['@' + f for f in file_stack + [file_name]])
+                    raise FatalError(f"File '{rel_path}' (expansion of {file_stack_str}) could not be opened. "
+                                     'Please ensure the file exists and you have the necessary permissions to read it.')
+        return expanded_args
+
+    argv = expand_args(argv, os.getcwd(), [])
+
+    if expanded:
+        print(f'Running: idf.py {" ".join(argv)}')
+
+    return argv
+
+
+def _valid_unicode_config() -> Union[codecs.CodecInfo, bool]:
     # Python 2 is always good
     if sys.version_info[0] == 2:
         return True
@@ -765,15 +818,13 @@ def _valid_unicode_config():
         return False
 
 
-def _find_usable_locale():
+def _find_usable_locale() -> str:
     try:
-        locales = subprocess.Popen(['locale', '-a'], stdout=subprocess.PIPE, stderr=subprocess.PIPE).communicate()[0]
+        locales = subprocess.Popen(['locale', '-a'], stdout=subprocess.PIPE, stderr=subprocess.PIPE).communicate()[0].decode('ascii', 'replace')
     except OSError:
         locales = ''
-    if isinstance(locales, bytes):
-        locales = locales.decode('ascii', 'replace')
 
-    usable_locales = []
+    usable_locales: List[str] = []
     for line in locales.splitlines():
         locale = line.strip()
         locale_name = locale.lower().replace('-', '')

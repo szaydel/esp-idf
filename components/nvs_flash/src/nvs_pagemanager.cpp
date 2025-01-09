@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2015-2022 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2015-2023 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -47,7 +47,10 @@ esp_err_t PageManager::load(Partition *partition, uint32_t baseSector, uint32_t 
         return activatePage();
     } else {
         uint32_t lastSeqNo;
-        ESP_ERROR_CHECK( mPageList.back().getSeqNumber(lastSeqNo) );
+        auto err = mPageList.back().getSeqNumber(lastSeqNo);
+        if (err != ESP_OK) {
+            return err;
+        }
         mSeqNumber = lastSeqNo + 1;
     }
 
@@ -140,7 +143,7 @@ esp_err_t PageManager::requestNewPage()
         return activatePage();
     }
 
-    // find the page with the higest number of erased items
+    // find the page with the highest number of erased items
     TPageListIterator maxUnusedItemsPageIt;
     size_t maxUnusedItems = 0;
     for (auto it = begin(); it != end(); ++it) {
@@ -215,6 +218,7 @@ esp_err_t PageManager::fillStats(nvs_stats_t& nvsStats)
 {
     nvsStats.used_entries      = 0;
     nvsStats.free_entries      = 0;
+    nvsStats.available_entries = 0;
     nvsStats.total_entries     = 0;
     esp_err_t err = ESP_OK;
 
@@ -226,9 +230,13 @@ esp_err_t PageManager::fillStats(nvs_stats_t& nvsStats)
         }
     }
 
-    // free pages
+    // add free pages
     nvsStats.total_entries += mFreePageList.size() * Page::ENTRY_COUNT;
     nvsStats.free_entries  += mFreePageList.size() * Page::ENTRY_COUNT;
+
+    // calculate available entries from free entries by applying reserved page size
+    // avoid overflow of size_t declared available_entries in case of free_entries being too low
+    nvsStats.available_entries = (nvsStats.free_entries >= Page::ENTRY_COUNT) ? nvsStats.free_entries - Page::ENTRY_COUNT : 0;
 
     return err;
 }

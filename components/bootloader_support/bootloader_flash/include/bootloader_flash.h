@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020-2022 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2020-2024 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -7,7 +7,8 @@
 
 #include <stdint.h>
 #include <esp_err.h>
-#include <esp_spi_flash.h> /* including in bootloader for error values */
+#include "spi_flash_mmap.h" /* including in bootloader for error values */
+#include "esp_private/spi_flash_os.h"
 #include "sdkconfig.h"
 #include "soc/soc_caps.h"
 #include "bootloader_flash_override.h"
@@ -24,20 +25,10 @@ extern "C" {
  */
 uint32_t bootloader_read_flash_id(void);
 
-#if SOC_CACHE_SUPPORT_WRAP
-/**
- * @brief Set the burst mode setting command for specified wrap mode.
- *
- * @param mode The specified warp mode.
- * @return always ESP_OK
- */
-esp_err_t bootloader_flash_wrap_set(spi_flash_wrap_mode_t mode);
-#endif
-
 /**
  * @brief Startup flow recommended by XMC. Call at startup before any erase/write operation.
  *
- * @return ESP_OK When startup successfully, otherwise ESP_FAIL (indiciating you should reboot before erase/write).
+ * @return ESP_OK When startup successfully, otherwise ESP_FAIL (indicating you should reboot before erase/write).
  */
 esp_err_t bootloader_flash_xmc_startup(void);
 
@@ -45,10 +36,37 @@ esp_err_t bootloader_flash_xmc_startup(void);
   * @brief Unlock Flash write protect.
   *        Please do not call this function in SDK.
   *
-  * @note This can be overridden because it's attribute weak.
+  * @note This can be overridden because it's attribute weak, when there is a same name symbol.
   */
-esp_err_t  __attribute__((weak)) bootloader_flash_unlock(void);
+esp_err_t bootloader_flash_unlock(void);
 
+/**
+  * @brief Unlock Flash write protect.
+  *        This is alias to `bootloader_flash_unlock`.
+  *        Please do not call this function in SDK.
+  */
+esp_err_t bootloader_flash_unlock_default(void);
+
+/**
+ * @brief Reset the flash chip (66H + 99H).
+ *
+ * @return ESP_OK if success, otherwise ESP_FAIL.
+ */
+esp_err_t bootloader_flash_reset_chip(void);
+
+/**
+ * @brief Check if octal flash mode is enabled in eFuse
+ *
+ * @return True if flash is in octal mode, false else
+ */
+bool bootloader_flash_is_octal_mode_enabled(void);
+
+/**
+ * @brief Get the spi flash working mode.
+ *
+ * @return The mode of flash working mode, see `esp_rom_spiflash_read_mode_t`
+ */
+esp_rom_spiflash_read_mode_t bootloader_flash_get_spi_mode(void);
 
 #ifdef __cplusplus
 }

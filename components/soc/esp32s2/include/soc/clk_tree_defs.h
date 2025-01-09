@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2022 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2022-2024 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -21,7 +21,7 @@ extern "C" {
  *
  * 2) External 40MHz Crystal Clock: XTAL
  *
- * 3) Internal 90kHz RC Oscillator: RC_SLOW (usually referrred as RTC in TRM or reg. description)
+ * 3) Internal 90kHz RC Oscillator: RC_SLOW (usually referred as RTC in TRM or reg. description)
  *
  *    This RC oscillator generates a ~90kHz clock signal output as the RC_SLOW_CLK. The exact frequency of this clock
  *    can be computed in runtime through calibration.
@@ -64,6 +64,7 @@ typedef enum {
     SOC_CPU_CLK_SRC_PLL = 1,               /*!< Select PLL_CLK as CPU_CLK source (PLL_CLK is the output of 40MHz crystal oscillator frequency multiplier, can be 480MHz or 320MHz) */
     SOC_CPU_CLK_SRC_RC_FAST = 2,           /*!< Select RC_FAST_CLK as CPU_CLK source */
     SOC_CPU_CLK_SRC_APLL = 3,              /*!< Select APLL_CLK as CPU_CLK source */
+    SOC_CPU_CLK_SRC_INVALID,               /*!< Invalid CPU_CLK source */
 } soc_cpu_clk_src_t;
 
 /**
@@ -74,6 +75,7 @@ typedef enum {
     SOC_RTC_SLOW_CLK_SRC_RC_SLOW = 0,      /*!< Select RC_SLOW_CLK as RTC_SLOW_CLK source */
     SOC_RTC_SLOW_CLK_SRC_XTAL32K = 1,      /*!< Select XTAL32K_CLK as RTC_SLOW_CLK source */
     SOC_RTC_SLOW_CLK_SRC_RC_FAST_D256 = 2, /*!< Select RC_FAST_D256_CLK (referred as FOSC_DIV or 8m_d256/8md256 in TRM and reg. description) as RTC_SLOW_CLK source */
+    SOC_RTC_SLOW_CLK_SRC_INVALID,          /*!< Invalid RTC_SLOW_CLK source */
 } soc_rtc_slow_clk_src_t;
 
 /**
@@ -82,9 +84,23 @@ typedef enum {
  */
 typedef enum {
     SOC_RTC_FAST_CLK_SRC_XTAL_D4 = 0,      /*!< Select XTAL_D4_CLK (may referred as XTAL_CLK_DIV_4) as RTC_FAST_CLK source */
-    SOC_RTC_FAST_CLK_SRC_XTAL_DIV = SOC_RTC_FAST_CLK_SRC_XTAL_D4, /*!< Alias name for `SOC_RTC_FAST_CLK_SRC_XTAL_D4` */
     SOC_RTC_FAST_CLK_SRC_RC_FAST = 1,      /*!< Select RC_FAST_CLK as RTC_FAST_CLK source */
+    SOC_RTC_FAST_CLK_SRC_INVALID,          /*!< Invalid RTC_FAST_CLK source */
+
+    SOC_RTC_FAST_CLK_SRC_DEFAULT = SOC_RTC_FAST_CLK_SRC_XTAL_D4, /*!< XTAL_D4_CLK is the default clock source for RTC_FAST_CLK */
+
+    SOC_RTC_FAST_CLK_SRC_XTAL_DIV __attribute__((deprecated)) = SOC_RTC_FAST_CLK_SRC_XTAL_D4, /*!< Alias name for `SOC_RTC_FAST_CLK_SRC_XTAL_D4` */
 } soc_rtc_fast_clk_src_t;
+
+/**
+ * @brief Possible main XTAL frequency options on the target
+ * @note Enum values equal to the frequency value in MHz
+ * @note Not all frequency values listed here are supported in IDF. Please check SOC_XTAL_SUPPORT_XXX in soc_caps.h for
+ *       the supported ones.
+ */
+typedef enum {
+    SOC_XTAL_FREQ_40M = 40,                /*!< 40MHz XTAL */
+} soc_xtal_freq_t;
 
 // Naming convention: SOC_MOD_CLK_{[upstream]clock_name}_[attr]
 // {[upstream]clock_name}: APB, APLL, (BB)PLL, etc.
@@ -110,8 +126,18 @@ typedef enum {
     SOC_MOD_CLK_REF_TICK,                      /*!< REF_TICK is derived from XTAL or RC_FAST via a divider, it has a fixed frequency of 1MHz by default */
     SOC_MOD_CLK_APLL,                          /*!< APLL is sourced from PLL, and its frequency is configurable through APLL configuration registers */
     SOC_MOD_CLK_TEMP_SENSOR,                   /*!< TEMP_SENSOR_CLK comes directly from the internal 8MHz rc oscillator */
+    SOC_MOD_CLK_INVALID,                       /*!< Indication of the end of the available module clock sources */
 } soc_module_clk_t;
 
+//////////////////////////////////////////////////SYSTIMER///////////////////////////////////////////////////////////////
+
+/**
+ * @brief Type of SYSTIMER clock source
+ */
+typedef enum {
+    SYSTIMER_CLK_SRC_XTAL = SOC_MOD_CLK_XTAL,       /*!< SYSTIMER source clock is XTAL */
+    SYSTIMER_CLK_SRC_DEFAULT = SOC_MOD_CLK_XTAL,    /*!< SYSTIMER source clock default choice is XTAL */
+} soc_periph_systimer_clk_src_t;
 
 //////////////////////////////////////////////////GPTimer///////////////////////////////////////////////////////////////
 
@@ -152,15 +178,13 @@ typedef enum {
 /**
  * @brief Array initializer for all supported clock sources of LCD
  */
-#define SOC_LCD_CLKS {SOC_MOD_CLK_PLL_F160M, SOC_MOD_CLK_APLL, SOC_MOD_CLK_XTAL}
+#define SOC_LCD_CLKS {SOC_MOD_CLK_PLL_F160M}
 
 /**
  * @brief Type of LCD clock source
  */
 typedef enum {
     LCD_CLK_SRC_PLL160M = SOC_MOD_CLK_PLL_F160M, /*!< Select PLL_F160M as the source clock */
-    LCD_CLK_SRC_APLL = SOC_MOD_CLK_APLL,         /*!< Select APLL as the source clock */
-    LCD_CLK_SRC_XTAL = SOC_MOD_CLK_XTAL,         /*!< Select XTAL as the source clock */
     LCD_CLK_SRC_DEFAULT = SOC_MOD_CLK_PLL_F160M, /*!< Select PLL_F160M as the default choice */
 } soc_periph_lcd_clk_src_t;
 
@@ -175,7 +199,6 @@ typedef enum {
  * @brief Type of RMT clock source
  */
 typedef enum {
-    RMT_CLK_SRC_NONE = 0,                        /*!< No clock source is selected */
     RMT_CLK_SRC_APB = SOC_MOD_CLK_APB,           /*!< Select APB as the source clock */
     RMT_CLK_SRC_REF_TICK = SOC_MOD_CLK_REF_TICK, /*!< Select REF_TICK as the source clock */
     RMT_CLK_SRC_DEFAULT = SOC_MOD_CLK_APB,       /*!< Select APB as the default choice */
@@ -208,6 +231,11 @@ typedef enum {
 ///////////////////////////////////////////////////UART/////////////////////////////////////////////////////////////////
 
 /**
+ * @brief Array initializer for all supported clock sources of UART
+ */
+#define SOC_UART_CLKS {SOC_MOD_CLK_APB, SOC_MOD_CLK_REF_TICK}
+
+/**
  * @brief Type of UART clock source, reserved for the legacy UART driver
  */
 typedef enum {
@@ -215,6 +243,206 @@ typedef enum {
     UART_SCLK_REF_TICK = SOC_MOD_CLK_REF_TICK, /*!< UART source clock is REF_TICK */
     UART_SCLK_DEFAULT = SOC_MOD_CLK_APB,       /*!< UART source clock default choice is APB */
 } soc_periph_uart_clk_src_legacy_t;
+
+///////////////////////////////////////////////////// I2S //////////////////////////////////////////////////////////////
+
+/**
+ * @brief Array initializer for all supported clock sources of I2S
+ */
+#define SOC_I2S_CLKS {SOC_MOD_CLK_PLL_F160M, SOC_MOD_CLK_APLL}
+
+/**
+ * @brief I2S clock source enum
+ */
+typedef enum {
+    I2S_CLK_SRC_DEFAULT = SOC_MOD_CLK_PLL_F160M,                    /*!< Select PLL_F160M as the default source clock  */
+    I2S_CLK_SRC_PLL_160M = SOC_MOD_CLK_PLL_F160M,                   /*!< Select PLL_F160M as the source clock */
+    I2S_CLK_SRC_APLL = SOC_MOD_CLK_APLL,                            /*!< Select APLL as the source clock */
+} soc_periph_i2s_clk_src_t;
+
+/////////////////////////////////////////////////I2C////////////////////////////////////////////////////////////////////
+
+/**
+ * @brief Array initializer for all supported clock sources of I2C
+ */
+#define SOC_I2C_CLKS {SOC_MOD_CLK_APB, SOC_MOD_CLK_REF_TICK}
+
+/**
+ * @brief Type of I2C clock source.
+ */
+typedef enum {
+    I2C_CLK_SRC_APB = SOC_MOD_CLK_APB,
+    I2C_CLK_SRC_REF_TICK = SOC_MOD_CLK_REF_TICK,
+    I2C_CLK_SRC_DEFAULT = SOC_MOD_CLK_APB,
+} soc_periph_i2c_clk_src_t;
+
+/////////////////////////////////////////////////SPI////////////////////////////////////////////////////////////////////
+
+/**
+ * @brief Array initializer for all supported clock sources of SPI
+ */
+#define SOC_SPI_CLKS {SOC_MOD_CLK_APB}
+
+/**
+ * @brief Type of SPI clock source.
+ */
+typedef enum {
+    SPI_CLK_SRC_DEFAULT = SOC_MOD_CLK_APB,      /*!< Select APB as SPI source clock */
+    SPI_CLK_SRC_APB = SOC_MOD_CLK_APB,          /*!< Select XTAL as SPI source clock */
+} soc_periph_spi_clk_src_t;
+
+//////////////////////////////////////////////////SDM//////////////////////////////////////////////////////////////
+
+/**
+ * @brief Array initializer for all supported clock sources of SDM
+ */
+#define SOC_SDM_CLKS {SOC_MOD_CLK_APB}
+
+/**
+ * @brief Sigma Delta Modulator clock source
+ */
+typedef enum {
+    SDM_CLK_SRC_APB = SOC_MOD_CLK_APB,     /*!< Select APB as the source clock */
+    SDM_CLK_SRC_DEFAULT = SOC_MOD_CLK_APB, /*!< Select APB as the default clock choice */
+} soc_periph_sdm_clk_src_t;
+
+//////////////////////////////////////////////////GPIO Glitch Filter////////////////////////////////////////////////////
+
+/**
+ * @brief Array initializer for all supported clock sources of Glitch Filter
+ */
+#define SOC_GLITCH_FILTER_CLKS {SOC_MOD_CLK_APB}
+
+/**
+ * @brief Glitch filter clock source
+ */
+
+typedef enum {
+    GLITCH_FILTER_CLK_SRC_APB = SOC_MOD_CLK_APB,      /*!< Select APB clock as the source clock */
+    GLITCH_FILTER_CLK_SRC_DEFAULT = SOC_MOD_CLK_APB,  /*!< Select APB clock as the default clock choice */
+} soc_periph_glitch_filter_clk_src_t;
+
+////////////////////////////////////////////////////DAC/////////////////////////////////////////////////////////////////
+
+/**
+ * @brief Array initializer for all supported clock sources of DAC digital controller
+ */
+#define SOC_DAC_DIGI_CLKS {SOC_MOD_CLK_APB, SOC_MOD_CLK_APLL}
+
+/**
+ * @brief DAC digital controller clock source
+ *
+ */
+typedef enum {
+    DAC_DIGI_CLK_SRC_APB = SOC_MOD_CLK_APB,         /*!< Select APB as the source clock */
+    DAC_DIGI_CLK_SRC_APLL = SOC_MOD_CLK_APLL,       /*!< Select APLL as the source clock */
+    DAC_DIGI_CLK_SRC_DEFAULT = SOC_MOD_CLK_APB,     /*!< Select APB as the default source clock */
+} soc_periph_dac_digi_clk_src_t;
+
+/**
+ * @brief Array initializer for all supported clock sources of DAC cosine wave generator
+ */
+#define SOC_DAC_COSINE_CLKS {SOC_MOD_CLK_RTC_FAST}
+
+/**
+ * @brief DAC cosine wave generator clock source
+ *
+ */
+typedef enum {
+    DAC_COSINE_CLK_SRC_RTC_FAST = SOC_MOD_CLK_RTC_FAST, /*!< Select RTC FAST as the source clock */
+    DAC_COSINE_CLK_SRC_DEFAULT = SOC_MOD_CLK_RTC_FAST,  /*!< Select RTC FAST as the default source clock */
+} soc_periph_dac_cosine_clk_src_t;
+
+//////////////////////////////////////////////////TWAI/////////////////////////////////////////////////////////////////
+
+/**
+ * @brief Array initializer for all supported clock sources of TWAI
+ */
+#define SOC_TWAI_CLKS {SOC_MOD_CLK_APB}
+
+/**
+ * @brief TWAI clock source
+ */
+typedef enum {
+    TWAI_CLK_SRC_APB = SOC_MOD_CLK_APB,     /*!< Select APB as the source clock */
+    TWAI_CLK_SRC_DEFAULT = SOC_MOD_CLK_APB, /*!< Select APB as the default clock choice */
+} soc_periph_twai_clk_src_t;
+
+//////////////////////////////////////////////////ADC///////////////////////////////////////////////////////////////////
+
+/**
+ * @brief Array initializer for all supported clock sources of ADC digital controller
+ */
+#define SOC_ADC_DIGI_CLKS {SOC_MOD_CLK_APB, SOC_MOD_CLK_APLL}
+
+/**
+ * @brief ADC digital controller clock source
+ */
+typedef enum {
+    ADC_DIGI_CLK_SRC_APB = SOC_MOD_CLK_APB,         /*!< Select APB as the source clock */
+    ADC_DIGI_CLK_SRC_APLL = SOC_MOD_CLK_APLL,       /*!< Select APLL as the source clock */
+    ADC_DIGI_CLK_SRC_DEFAULT = SOC_MOD_CLK_APB,     /*!< Select APB as the default clock choice */
+} soc_periph_adc_digi_clk_src_t;
+
+/**
+ * @brief Array initializer for all supported clock sources of ADC RTC controller
+ */
+#define SOC_ADC_RTC_CLKS {SOC_MOD_CLK_RC_FAST}
+
+/**
+ * @brief ADC RTC controller clock source
+ */
+typedef enum {
+    ADC_RTC_CLK_SRC_RC_FAST = SOC_MOD_CLK_RC_FAST,  /*!< Select RC_FAST as the source clock */
+    ADC_RTC_CLK_SRC_DEFAULT = SOC_MOD_CLK_RC_FAST,  /*!< Select RC_FAST as the default clock choice */
+} soc_periph_adc_rtc_clk_src_t;
+
+//////////////////////////////////////////////////MWDT/////////////////////////////////////////////////////////////////
+
+/**
+ * @brief Array initializer for all supported clock sources of MWDT
+ */
+#define SOC_MWDT_CLKS {SOC_MOD_CLK_APB}
+
+/**
+ * @brief MWDT clock source
+ */
+typedef enum {
+    MWDT_CLK_SRC_APB = SOC_MOD_CLK_APB,     /*!< Select APB as the source clock */
+    MWDT_CLK_SRC_DEFAULT = SOC_MOD_CLK_APB, /*!< Select APB as the default clock choice */
+} soc_periph_mwdt_clk_src_t;
+
+//////////////////////////////////////////////////LEDC/////////////////////////////////////////////////////////////////
+
+/**
+ * @brief Array initializer for all supported clock sources of LEDC
+ */
+#define SOC_LEDC_CLKS {SOC_MOD_CLK_XTAL, SOC_MOD_CLK_APB, SOC_MOD_CLK_RC_FAST, SOC_MOD_CLK_REF_TICK}
+
+/**
+ * @brief Type of LEDC clock source, reserved for the legacy LEDC driver
+ */
+typedef enum {
+    LEDC_AUTO_CLK = 0,                              /*!< LEDC source clock will be automatically selected based on the giving resolution and duty parameter when init the timer*/
+    LEDC_USE_APB_CLK = SOC_MOD_CLK_APB,             /*!< Select APB as the source clock */
+    LEDC_USE_RC_FAST_CLK = SOC_MOD_CLK_RC_FAST,     /*!< Select RC_FAST as the source clock */
+    LEDC_USE_REF_TICK = SOC_MOD_CLK_REF_TICK,       /*!< Select REF_TICK as the source clock */
+    LEDC_USE_XTAL_CLK = SOC_MOD_CLK_XTAL,           /*!< Select XTAL as the source clock */
+
+    LEDC_USE_RTC8M_CLK __attribute__((deprecated("please use 'LEDC_USE_RC_FAST_CLK' instead"))) = LEDC_USE_RC_FAST_CLK,   /*!< Alias of 'LEDC_USE_RC_FAST_CLK' */
+} soc_periph_ledc_clk_src_legacy_t;
+
+//////////////////////////////////////////////CLOCK OUTPUT///////////////////////////////////////////////////////////
+typedef enum {
+    CLKOUT_SIG_PLL      = 1,    /*!< PLL_CLK is the output of crystal oscillator frequency multiplier */
+    CLKOUT_SIG_RC_SLOW  = 4,    /*!< RC slow clock, depends on the RTC_CLK_SRC configuration */
+    CLKOUT_SIG_XTAL     = 5,    /*!< Main crystal oscillator clock */
+    CLKOUT_SIG_APLL     = 6,    /*!< Divided by PLL, frequency is configurable */
+    CLKOUT_SIG_REF_TICK = 12,   /*!< Divided by APB clock, usually be 1MHz */
+    CLKOUT_SIG_PLL_F80M = 13,   /*!< From PLL, usually be 80MHz */
+    CLKOUT_SIG_RC_FAST  = 14,   /*!< RC fast clock, about 17.5MHz */
+    CLKOUT_SIG_INVALID  = 0xFF,
+} soc_clkout_sig_id_t;
 
 #ifdef __cplusplus
 }

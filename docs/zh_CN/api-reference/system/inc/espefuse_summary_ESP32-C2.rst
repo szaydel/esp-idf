@@ -1,10 +1,2 @@
-.. code-block:: none
-
-    TO BE UPDATED WITH TARGET SPECIFIC INFORMATION, IDF-4223
-
-To get a dump for all eFuse registers.
-
-.. code-block:: none
-
-
-    TO BE UPDATED WITH TARGET SPECIFIC INFORMATION, IDF-4223
+.. Translation not required: source file contains only code.
+.. include:: ../../../en/api-reference/system/inc/espefuse_summary_ESP32-C2.rst

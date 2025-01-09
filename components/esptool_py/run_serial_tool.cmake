@@ -4,7 +4,7 @@
 #
 # It is recommended to NOT USE this CMake script if you have the option of
 # running the tool directly. This script exists only for use inside CMake builds.
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.16)
 
 if(NOT IDF_PATH)
     message(FATAL_ERROR "IDF_PATH not set.")
@@ -43,14 +43,26 @@ else()
     list(APPEND serial_tool_cmd -b ${ESPBAUD})
 endif()
 
+# SERIAL_TOOL_ARGS is defined during the first cmake run
+# EXTRA_ARGS and EXTRA_PRE_CMD_ARGS are used for additional arguments from the command line during run-time
+list(APPEND serial_tool_cmd $ENV{SERIAL_TOOL_EXTRA_PRE_CMD_ARGS})
 list(APPEND serial_tool_cmd ${SERIAL_TOOL_ARGS})
+list(APPEND serial_tool_cmd $ENV{SERIAL_TOOL_EXTRA_ARGS})
 
-execute_process(COMMAND ${serial_tool_cmd}
-    WORKING_DIRECTORY "${WORKING_DIRECTORY}"
-    RESULT_VARIABLE result
+if(${SERIAL_TOOL_SILENT})
+    execute_process(COMMAND ${serial_tool_cmd}
+        WORKING_DIRECTORY "${WORKING_DIRECTORY}"
+        RESULT_VARIABLE result
+        OUTPUT_VARIABLE SERIAL_TOOL_OUTPUT_LOG
     )
+else()
+    execute_process(COMMAND ${serial_tool_cmd}
+        WORKING_DIRECTORY "${WORKING_DIRECTORY}"
+        RESULT_VARIABLE result
+    )
+endif()
 
 if(${result})
     # No way to have CMake silently fail, unfortunately
-    message(FATAL_ERROR "${SERIAL_TOOL} failed")
+    message(FATAL_ERROR "${SERIAL_TOOL} failed. \n${SERIAL_TOOL_OUTPUT_LOG}")
 endif()

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2015-2022 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2015-2025 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -10,9 +10,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <esp_err.h>
-#include <esp_spi_flash.h> /* including in bootloader for error values */
+#include <spi_flash_mmap.h> /* including in bootloader for error values */
 #include "sdkconfig.h"
 #include "bootloader_flash.h"
+#include "soc/ext_mem_defs.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -20,21 +21,22 @@ extern "C" {
 
 #define FLASH_SECTOR_SIZE 0x1000
 #define FLASH_BLOCK_SIZE 	0x10000
-#define MMAP_ALIGNED_MASK 	0x0000FFFF
 
-//This will be replaced with a kconfig, TODO: IDF-3821
-#define MMU_PAGE_SIZE                   0x10000
-#define MMU_FLASH_MASK                  (~(MMU_PAGE_SIZE - 1))
+#define MMAP_ALIGNED_MASK 	(SPI_FLASH_MMU_PAGE_SIZE - 1)
+#define MMU_FLASH_MASK    (~(SPI_FLASH_MMU_PAGE_SIZE - 1))
+#define MMU_FLASH_MASK_FROM_VAL(PAGE_SZ) (~((PAGE_SZ) - 1))
+#define MMU_DROM_END_ENTRY_VADDR_FROM_VAL(PAGE_SZ) (SOC_DRAM_FLASH_ADDRESS_HIGH - (PAGE_SZ))
+
 /**
- * MMU mapping must always be in the unit of a MMU_PAGE_SIZE
+ * MMU mapping must always be in the unit of a SPI_FLASH_MMU_PAGE_SIZE
  * This macro is a helper for you to get needed page nums to be mapped. e.g.:
- * Let's say MMU_PAGE_SIZE is 64KB.
+ * Let's say SPI_FLASH_MMU_PAGE_SIZE is 64KB.
  * - v_start = 0x4200_0004
  * - size = 4 * 64KB
  *
  * You should map from 0x4200_0000, then map 5 pages.
  */
-#define GET_REQUIRED_MMU_PAGES(size, v_start)    ((size + (v_start - (v_start & MMU_FLASH_MASK)) + MMU_PAGE_SIZE - 1) / MMU_PAGE_SIZE)
+#define GET_REQUIRED_MMU_PAGES(size, v_start)    ((size + (v_start - (v_start & MMU_FLASH_MASK)) + SPI_FLASH_MMU_PAGE_SIZE - 1) / SPI_FLASH_MMU_PAGE_SIZE)
 
 /* SPI commands (actual on-wire commands not SPI controller bitmasks)
    Suitable for use with the bootloader_execute_flash_command static function.
@@ -44,14 +46,22 @@ extern "C" {
 #define CMD_WRSR2      0x31 /* Not all SPI flash uses this command */
 #define CMD_WRSR3      0x11 /* Not all SPI flash uses this command */
 #define CMD_WREN       0x06
+#define CMD_WRENVSR    0x50 /* Flash write enable for volatile SR bits */
 #define CMD_WRDI       0x04
 #define CMD_RDSR       0x05
 #define CMD_RDSR2      0x35 /* Not all SPI flash uses this command */
 #define CMD_RDSR3      0x15 /* Not all SPI flash uses this command */
 #define CMD_OTPEN      0x3A /* Enable OTP mode, not all SPI flash uses this command */
 #define CMD_RDSFDP     0x5A /* Read the SFDP of the flash */
-#define CMD_WRAP       0x77 /* Set burst with wrap command */
 #define CMD_RESUME     0x7A /* Resume command to clear flash suspend bit */
+#define CMD_RESETEN    0x66
+#define CMD_RESET      0x99
+#define CMD_FASTRD_QIO_4B   0xEC
+#define CMD_FASTRD_QUAD_4B  0x6C
+#define CMD_FASTRD_DIO_4B   0xBC
+#define CMD_FASTRD_DUAL_4B  0x3C
+#define CMD_FASTRD_4B       0x0C
+#define CMD_SLOWRD_4B       0x13
 
 
 /* Provide a Flash API for bootloader_support code,
@@ -83,7 +93,7 @@ uint32_t bootloader_mmap_get_free_pages(void);
  * @param length - Length of data to map.
  *
  * @return Pointer to mapped data memory (at src_addr), or NULL
- * if an allocation error occured.
+ * if an allocation error occurred.
  */
 const void *bootloader_mmap(uint32_t src_addr, uint32_t size);
 
@@ -118,7 +128,10 @@ esp_err_t bootloader_flash_read(size_t src_addr, void *dest, size_t size, bool a
  *
  * @note All of dest_addr, src and size have to be 4-byte aligned. If write_encrypted is set, dest_addr and size must be 32-byte aligned.
  *
- * Note: In bootloader, when write_encrypted == true, the src buffer is encrypted in place.
+ * @note In bootloader, when write_encrypted == true, the src buffer is encrypted in place.
+ *
+ * @note [ESP-TEE] Using this API from the TEE will return an error if the dest_addr lies
+ *       within the active TEE partition range.
  *
  * @param  dest_addr Destination address to write in Flash.
  * @param  src Pointer to the data to write to flash
@@ -141,6 +154,9 @@ esp_err_t bootloader_flash_erase_sector(size_t sector);
 
 /**
  * @brief  Erase the Flash range.
+ *
+ * @note   [ESP-TEE] Using this API from the TEE will return an error if the start_addr lies
+ *         within the active TEE partition range.
  *
  * @param  start_addr start address of flash offset
  * @param  size       sector aligned size to be erased
@@ -173,6 +189,14 @@ uint32_t bootloader_flash_read_sfdp(uint32_t sfdp_addr, unsigned int miso_byte_n
  * @brief Enable the flash write protect (WEL bit).
  */
 void bootloader_enable_wp(void);
+
+/**
+ * @brief Once this function is called,
+ * any on-going internal operations will be terminated and the device will return to its default power-on
+ * state and lose all the current volatile settings, such as Volatile Status Register bits, Write Enable Latch
+ * (WEL) status, Program/Erase Suspend status, etc.
+ */
+void bootloader_spi_flash_reset(void);
 
 #ifdef __cplusplus
 }

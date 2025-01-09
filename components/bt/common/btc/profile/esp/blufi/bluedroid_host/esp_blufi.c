@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2015-2022 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2015-2024 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -144,7 +144,7 @@ static void blufi_profile_cb(tBTA_GATTS_EVT event, tBTA_GATTS *p_data)
         msg.act = ESP_BLUFI_EVENT_DEINIT_FINISH;
         param.deinit_finish.state = ESP_BLUFI_DEINIT_OK;
 
-        btc_transfer_context(&msg, &param, sizeof(esp_blufi_cb_param_t), NULL);
+        btc_transfer_context(&msg, &param, sizeof(esp_blufi_cb_param_t), NULL, NULL);
 
         break;
     }
@@ -160,20 +160,31 @@ static void blufi_profile_cb(tBTA_GATTS_EVT event, tBTA_GATTS *p_data)
         if (p_data->req_data.p_data->write_req.is_prep) {
             tBTA_GATT_STATUS status = GATT_SUCCESS;
 
-            if (blufi_env.prepare_buf == NULL) {
-                blufi_env.prepare_buf = osi_malloc(BLUFI_PREPAIR_BUF_MAX_SIZE);
-                blufi_env.prepare_len = 0;
+            do {
+                if (p_data->req_data.p_data->write_req.offset > BLUFI_PREPARE_BUF_MAX_SIZE) {
+                   status = ESP_GATT_INVALID_OFFSET;
+                   break;
+                }
+
+                if ((p_data->req_data.p_data->write_req.offset + p_data->req_data.p_data->write_req.len) > BLUFI_PREPARE_BUF_MAX_SIZE) {
+                   status = ESP_GATT_INVALID_ATTR_LEN;
+                   break;
+                }
+
                 if (blufi_env.prepare_buf == NULL) {
-                    BLUFI_TRACE_ERROR("Blufi prep no mem\n");
-                    status = GATT_NO_RESOURCES;
+                    if (p_data->req_data.p_data->write_req.offset != 0) {
+                        status = GATT_INVALID_OFFSET;
+                        break;
+                    }
+                    blufi_env.prepare_buf = osi_malloc(BLUFI_PREPARE_BUF_MAX_SIZE);
+                    blufi_env.prepare_len = 0;
+                    if (blufi_env.prepare_buf == NULL) {
+                        BLUFI_TRACE_ERROR("Blufi prep no mem\n");
+                        status = GATT_NO_RESOURCES;
+                        break;
+                    }
                 }
-            } else {
-                if (p_data->req_data.p_data->write_req.offset > BLUFI_PREPAIR_BUF_MAX_SIZE) {
-                    status = GATT_INVALID_OFFSET;
-                } else if ((p_data->req_data.p_data->write_req.offset + p_data->req_data.p_data->write_req.len) > BLUFI_PREPAIR_BUF_MAX_SIZE) {
-                    status = GATT_INVALID_ATTR_LEN;
-                }
-            }
+            } while (0);
 
             memset(&rsp, 0, sizeof(tGATTS_RSP));
             rsp.attr_value.handle = p_data->req_data.p_data->write_req.handle;
@@ -241,7 +252,7 @@ static void blufi_profile_cb(tBTA_GATTS_EVT event, tBTA_GATTS *p_data)
     case BTA_GATTS_CREATE_EVT:
         blufi_env.handle_srvc = p_data->create.service_id;
 
-        //add the frist blufi characteristic --> write characteristic
+        //add the first blufi characteristic --> write characteristic
         BTA_GATTS_AddCharacteristic(blufi_env.handle_srvc, &blufi_char_uuid_p2e,
                                     (GATT_PERM_WRITE),
                                     (GATT_CHAR_PROP_BIT_WRITE),
@@ -283,7 +294,7 @@ static void blufi_profile_cb(tBTA_GATTS_EVT event, tBTA_GATTS *p_data)
         msg.act = ESP_BLUFI_EVENT_INIT_FINISH;
         param.init_finish.state = ESP_BLUFI_INIT_OK;
 
-        btc_transfer_context(&msg, &param, sizeof(esp_blufi_cb_param_t), NULL);
+        btc_transfer_context(&msg, &param, sizeof(esp_blufi_cb_param_t), NULL, NULL);
         break;
     }
     case BTA_GATTS_CONNECT_EVT: {
@@ -307,7 +318,7 @@ static void blufi_profile_cb(tBTA_GATTS_EVT event, tBTA_GATTS *p_data)
         param.connect.conn_id = BTC_GATT_GET_CONN_ID(p_data->conn.conn_id);
         conn_id = param.connect.conn_id;
         server_if = p_data->conn.server_if;
-        btc_transfer_context(&msg, &param, sizeof(esp_blufi_cb_param_t), NULL);
+        btc_transfer_context(&msg, &param, sizeof(esp_blufi_cb_param_t), NULL, NULL);
         break;
     }
     case BTA_GATTS_DISCONNECT_EVT: {
@@ -335,7 +346,7 @@ static void blufi_profile_cb(tBTA_GATTS_EVT event, tBTA_GATTS *p_data)
         msg.pid = BTC_PID_BLUFI;
         msg.act = ESP_BLUFI_EVENT_BLE_DISCONNECT;
         memcpy(param.disconnect.remote_bda, p_data->conn.remote_bda, ESP_BLUFI_BD_ADDR_LEN);
-        btc_transfer_context(&msg, &param, sizeof(esp_blufi_cb_param_t), NULL);
+        btc_transfer_context(&msg, &param, sizeof(esp_blufi_cb_param_t), NULL, NULL);
         break;
     }
     case BTA_GATTS_OPEN_EVT:
@@ -385,8 +396,6 @@ void esp_blufi_send_encap(void *arg)
 retry:
     if (blufi_env.is_connected == false) {
         BTC_TRACE_WARNING("%s ble connection is broken\n", __func__);
-        osi_free(hdr);
-        hdr =  NULL;
         return;
     }
     if (esp_ble_get_cur_sendable_packets_num(BTC_GATT_GET_CONN_ID(blufi_env.conn_id)) > 0) {
@@ -410,7 +419,7 @@ esp_err_t esp_blufi_close(esp_gatt_if_t gatts_if, uint16_t conn_id)
     msg.pid = BTC_PID_GATTS;
     msg.act = BTC_GATTS_ACT_CLOSE;
     arg.close.conn_id = BTC_GATT_CREATE_CONN_ID(gatts_if, conn_id);
-    return (btc_transfer_context(&msg, &arg, sizeof(btc_ble_gatts_args_t), NULL)
+    return (btc_transfer_context(&msg, &arg, sizeof(btc_ble_gatts_args_t), NULL, NULL)
             == BT_STATUS_SUCCESS ? ESP_OK : ESP_FAIL);
 }
 

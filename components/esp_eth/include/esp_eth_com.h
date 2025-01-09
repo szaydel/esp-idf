@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2019-2021 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2019-2024 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -13,6 +13,17 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/**
+ * @brief Offset for start of MAC custom ioctl commands
+ *
+ */
+#define ETH_CMD_CUSTOM_MAC_CMDS_OFFSET      0x0FFF
+/**
+ * @brief Offset for start of PHY custom ioctl commands
+ *
+ */
+#define ETH_CMD_CUSTOM_PHY_CMDS_OFFSET      0x1FFF
 
 /**
 * @brief Ethernet driver state
@@ -82,6 +93,20 @@ struct esp_eth_mediator_s {
     esp_err_t (*stack_input)(esp_eth_mediator_t *eth, uint8_t *buffer, uint32_t length);
 
     /**
+    * @brief Deliver packet to upper stack with additional information about reception
+    *
+    * @param[in] eth: mediator of Ethernet driver
+    * @param[in] buffer: packet buffer
+    * @param[in] length: length of the packet
+    * @param[in] info: info associated with reception (e.g. time stamp)
+    *
+    * @return
+    *       - ESP_OK: deliver packet to upper stack successfully
+    *       - ESP_FAIL: deliver packet failed because some error occurred
+    */
+    esp_err_t (*stack_input_info)(esp_eth_mediator_t *eth, uint8_t *buffer, uint32_t length, void *info);
+
+    /**
     * @brief Callback on Ethernet state changed
     *
     * @param[in] eth: mediator of Ethernet driver
@@ -112,19 +137,6 @@ typedef enum {
 *
 */
 ESP_EVENT_DECLARE_BASE(ETH_EVENT);
-
-/**
-* @brief Detect PHY address
-*
-* @param[in] eth: mediator of Ethernet driver
-* @param[out] detected_addr: a valid address after detection
-* @return
-*       - ESP_OK: detect phy address successfully
-*       - ESP_ERR_INVALID_ARG: invalid parameter
-*       - ESP_ERR_NOT_FOUND: can't detect any PHY device
-*       - ESP_FAIL: detect phy address failed because some error occurred
-*/
-esp_err_t esp_eth_detect_phy_addr(esp_eth_mediator_t *eth, int *detected_addr);
 
 #ifdef __cplusplus
 }

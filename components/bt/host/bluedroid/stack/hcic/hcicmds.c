@@ -35,8 +35,6 @@
 
 #include "btm_int.h"    /* Included for UIPC_* macro definitions */
 
-#define HCI_GET_CMD_BUF(paramlen)       ((BT_HDR *)osi_malloc(HCIC_PREAMBLE_SIZE + sizeof(BT_HDR) + paramlen))
-
 BOOLEAN btsnd_hcic_inquiry(const LAP inq_lap, UINT8 duration, UINT8 response_cnt)
 {
     BT_HDR *p;
@@ -1331,6 +1329,9 @@ BOOLEAN btsnd_hcic_host_num_xmitted_pkts (UINT8 num_handles, UINT16 *handle,
     p->len    = HCIC_PREAMBLE_SIZE + 1 + (num_handles * 4);
     p->offset = 0;
 
+    hci_cmd_metadata_t *metadata = HCI_GET_CMD_METAMSG(p);
+    metadata->flags_src |= HCI_CMD_MSG_F_SRC_NOACK;
+
     UINT16_TO_STREAM (pp, HCI_HOST_NUM_PACKETS_DONE);
     UINT8_TO_STREAM  (pp, p->len - HCIC_PREAMBLE_SIZE);
 
@@ -1431,9 +1432,13 @@ BOOLEAN btsnd_hcic_sniff_sub_rate(UINT16 handle, UINT16 max_lat,
 #endif /* BTM_SSR_INCLUDED */
 
 /**** Extended Inquiry Response Commands ****/
-void btsnd_hcic_write_ext_inquiry_response (void *buffer, UINT8 fec_req)
+void btsnd_hcic_write_ext_inquiry_response (BT_HDR *buffer, UINT8 fec_req)
 {
-    BT_HDR *p = (BT_HDR *)buffer;
+    BT_HDR *p;
+    if ((p = HCI_GET_CMD_BUF(HCIC_PARAM_SIZE_EXT_INQ_RESP)) == NULL) {
+        return;
+    }
+
     UINT8 *pp = (UINT8 *)(p + 1);
 
     p->len    = HCIC_PREAMBLE_SIZE + HCIC_PARAM_SIZE_EXT_INQ_RESP;
@@ -1441,8 +1446,9 @@ void btsnd_hcic_write_ext_inquiry_response (void *buffer, UINT8 fec_req)
 
     UINT16_TO_STREAM (pp, HCI_WRITE_EXT_INQ_RESPONSE);
     UINT8_TO_STREAM  (pp, HCIC_PARAM_SIZE_EXT_INQ_RESP);
-
     UINT8_TO_STREAM (pp, fec_req);
+
+    memcpy(pp, buffer->data + 4, p->len - 4);
 
     btu_hcif_send_cmd (LOCAL_BR_EDR_CONTROLLER_ID,  p);
 }
@@ -1862,17 +1868,17 @@ BOOLEAN btsnd_hcic_write_pagescan_type (UINT8 type)
 #error "HCI_CMD_POOL_BUF_SIZE must be larger than 268"
 #endif
 
-void btsnd_hcic_vendor_spec_cmd (void *buffer, UINT16 opcode, UINT8 len,
+void btsnd_hcic_vendor_spec_cmd (BT_HDR *buffer, UINT16 opcode, UINT8 len,
                                  UINT8 *p_data, void *p_cmd_cplt_cback)
 {
-    BT_HDR *p = (BT_HDR *)buffer;
+    BT_HDR *p = buffer;
     UINT8 *pp = (UINT8 *)(p + 1);
 
     p->len    = HCIC_PREAMBLE_SIZE + len;
-    p->offset = sizeof(void *);
+    p->offset = 0;
 
-    *((void **)pp) = p_cmd_cplt_cback;  /* Store command complete callback in buffer */
-    pp += sizeof(void *);               /* Skip over callback pointer */
+    hci_cmd_metadata_t * metadata = HCI_GET_CMD_METAMSG(p);
+    metadata->context = p_cmd_cplt_cback;
 
     UINT16_TO_STREAM (pp, HCI_GRP_VENDOR_SPECIFIC | opcode);
     UINT8_TO_STREAM  (pp, len);
@@ -1904,4 +1910,30 @@ BOOLEAN btsnd_hcic_set_afh_channels (AFH_CHANNELS channels)
     btu_hcif_send_cmd (LOCAL_BR_EDR_CONTROLLER_ID,  p);
     return (TRUE);
 }
+
+#if (ENC_KEY_SIZE_CTRL_MODE == ENC_KEY_SIZE_CTRL_MODE_STD)
+BOOLEAN btsnd_hcic_set_min_enc_key_size (UINT8 size)
+{
+    BT_HDR *p;
+    UINT8 *pp;
+
+    if ((p = HCI_GET_CMD_BUF(HCIC_PARAM_SIZE_SET_MIN_ENC_KEY_SIZE)) == NULL) {
+        return (FALSE);
+    }
+
+    pp = (UINT8 *)(p + 1);
+
+    p->len    = HCIC_PREAMBLE_SIZE + HCIC_PARAM_SIZE_SET_MIN_ENC_KEY_SIZE;
+    p->offset = 0;
+
+    UINT16_TO_STREAM (pp, HCI_SET_MIN_ENC_KEY_SIZE);
+    UINT8_TO_STREAM  (pp, HCIC_PARAM_SIZE_SET_MIN_ENC_KEY_SIZE);
+
+    UINT8_TO_STREAM  (pp, size);
+
+    btu_hcif_send_cmd (LOCAL_BR_EDR_CONTROLLER_ID,  p);
+    return (TRUE);
+}
+#endif
+
 #endif /// CLASSIC_BT_INCLUDED == TRUE

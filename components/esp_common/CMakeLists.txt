@@ -1,17 +1,17 @@
 idf_build_get_property(target IDF_TARGET)
 
 if(${target} STREQUAL "linux")
-    # Header only library for linux
-    idf_component_register(INCLUDE_DIRS include)
-    return()
+    set(ldfragments)
+else()
+    set(ldfragments common.lf soc.lf)
 endif()
 
-list(APPEND srcs "src/esp_err_to_name.c")
+set(srcs "src/esp_err_to_name.c")
 
 # Note: esp_ipc, esp_pm added as a public requirement to keep compatibility as to be located here.
 idf_component_register(SRCS "${srcs}"
                         INCLUDE_DIRS include
-                        LDFRAGMENTS "common.lf" "soc.lf")
+                        LDFRAGMENTS ${ldfragments})
 
 set_property(TARGET ${COMPONENT_LIB} APPEND PROPERTY LINK_INTERFACE_MULTIPLICITY 4)
 

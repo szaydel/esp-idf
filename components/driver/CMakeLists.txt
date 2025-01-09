@@ -1,110 +1,95 @@
 idf_build_get_property(target IDF_TARGET)
 
-set(srcs
-    "gpio/gpio.c"
-    "gpio/rtc_io.c"
-    "gptimer.c"
-    "i2c.c"
-    "ledc.c"
-    "sdspi_crc.c"
-    "sdspi_host.c"
-    "sdspi_transaction.c"
-    "spi_common.c"
-    "spi_master.c"
-    "spi_slave.c"
-    "spi_bus_lock.c"
-    "uart.c")
-
-# deprecated source files
-list(APPEND srcs "deprecated/timer_legacy.c")
-
-set(includes "include" "deprecated")
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${target}/include")
-    list(APPEND includes "${target}/include")
+if(${target} STREQUAL "linux")
+    return() # This component is not supported by the POSIX/Linux simulator
 endif()
 
+# Always compiled source files
+set(srcs)
+
+# Always included headers
+set(includes "deprecated"
+             "i2c/include"
+             "touch_sensor/include"
+             "twai/include")
+
+# Always included linker fragments
+set(ldfragments "")
+
+# ADC related source files (deprecated)
 if(CONFIG_SOC_ADC_SUPPORTED)
-    list(APPEND srcs
-         "adc_single.c"
-         "adc.c")
+    list(APPEND srcs "deprecated/adc_legacy.c")
+
+    if(CONFIG_SOC_ADC_DMA_SUPPORTED)
+        list(APPEND srcs "deprecated/adc_dma_legacy.c")
+    endif()
 endif()
 
-if(CONFIG_SOC_MCPWM_SUPPORTED)
-    list(APPEND srcs "mcpwm.c")
+# DAC related source files
+if(CONFIG_SOC_DAC_SUPPORTED)
+    list(APPEND srcs "deprecated/dac_common_legacy.c"
+                     "deprecated/${target}/dac_legacy.c")
 endif()
 
-if(CONFIG_SOC_GDMA_SUPPORTED)
-    list(APPEND srcs "gdma.c")
+# GPTimer legacy driver
+if(CONFIG_SOC_GPTIMER_SUPPORTED)
+    list(APPEND srcs "deprecated/timer_legacy.c")
 endif()
 
-if(CONFIG_SOC_DEDICATED_GPIO_SUPPORTED)
-    list(APPEND srcs "gpio/dedic_gpio.c")
+# I2C related source files
+if(CONFIG_SOC_I2C_SUPPORTED)
+    list(APPEND srcs "i2c/i2c.c")
 endif()
 
-if(CONFIG_SOC_SIGMADELTA_SUPPORTED)
-    list(APPEND srcs "gpio/sigmadelta_gpio.c")
-endif()
-
-if(CONFIG_SOC_RMT_SUPPORTED)
-    list(APPEND srcs "rmt/rmt_common.c" "rmt/rmt_encoder.c" "rmt/rmt_rx.c" "rmt/rmt_tx.c" "deprecated/rmt_legacy.c")
-endif()
-
-if(CONFIG_SOC_PCNT_SUPPORTED)
-    list(APPEND srcs "pulse_cnt.c" "deprecated/pcnt_legacy.c")
-endif()
-
-if(CONFIG_SOC_SDMMC_HOST_SUPPORTED)
-    list(APPEND srcs "sdmmc_transaction.c" "sdmmc_host.c")
-endif()
-
+# I2S related source files
 if(CONFIG_SOC_I2S_SUPPORTED)
-    list(APPEND srcs "i2s.c")
+    list(APPEND srcs "deprecated/i2s_legacy.c")
 endif()
 
+# MCPWM legacy driver
+if(CONFIG_SOC_MCPWM_SUPPORTED)
+    list(APPEND srcs "deprecated/mcpwm_legacy.c")
+endif()
+
+# PCNT legacy driver
+if(CONFIG_SOC_PCNT_SUPPORTED)
+    list(APPEND srcs "deprecated/pcnt_legacy.c")
+endif()
+
+# RMT legacy driver
+if(CONFIG_SOC_RMT_SUPPORTED)
+    list(APPEND srcs "deprecated/rmt_legacy.c")
+endif()
+
+# Sigma-Delta Modulation legacy driver
+if(CONFIG_SOC_SDM_SUPPORTED)
+    list(APPEND srcs "deprecated/sigma_delta_legacy.c")
+endif()
+
+# Temperature Sensor related source files
 if(CONFIG_SOC_TEMP_SENSOR_SUPPORTED)
-    list(APPEND srcs "temperature_sensor.c"
-                     "deprecated/rtc_temperature_legacy.c")
+    list(APPEND srcs "deprecated/rtc_temperature_legacy.c")
 endif()
 
+# Touch Sensor related source files
+if(CONFIG_SOC_TOUCH_SENSOR_SUPPORTED)
+    if(CONFIG_SOC_TOUCH_SENSOR_VERSION LESS 3)
+        list(APPEND srcs "touch_sensor/touch_sensor_common.c"
+                        "touch_sensor/${target}/touch_sensor.c")
+        list(APPEND includes "touch_sensor/${target}/include")
+    endif()
+endif()
+
+# TWAI related source files
 if(CONFIG_SOC_TWAI_SUPPORTED)
-    list(APPEND srcs "twai.c")
+    list(APPEND srcs "twai/twai.c")
+
+    list(APPEND ldfragments "twai/linker.lf")
 endif()
 
-if(CONFIG_SOC_USB_SERIAL_JTAG_SUPPORTED)
-    list(APPEND srcs "usb_serial_jtag.c")
-endif()
-
-if(CONFIG_SOC_SPI_SUPPORT_SLAVE_HD_VER2)
-    list(APPEND srcs "spi_slave_hd.c")
-endif()
-
+# Other source files
 if(${target} STREQUAL "esp32")
-    list(APPEND srcs "dac_common.c"
-                     "sdio_slave.c"
-                     "touch_sensor_common.c"
-                     "esp32/touch_sensor.c"
-                     "esp32/adc.c"
-                     "adc_deprecated.c"
-                     "esp32/dac.c")
-endif()
-
-if(${target} STREQUAL "esp32s2")
-    list(APPEND srcs "dac_common.c"
-                     "touch_sensor_common.c"
-                     "esp32s2/touch_sensor.c"
-                     "esp32s2/adc.c"
-                     "adc_deprecated.c"
-                     "esp32s2/adc2_init_cal.c"
-                     "esp32s2/dac.c")
-endif()
-
-if(${target} STREQUAL "esp32s3")
-    list(APPEND srcs "touch_sensor_common.c"
-                     "esp32s3/touch_sensor.c")
-endif()
-
-if(${target} STREQUAL "esp32c3")
-    list(APPEND srcs "esp32c3/adc2_init_cal.c")
+    list(APPEND srcs "deprecated/adc_i2s_deprecated.c")
 endif()
 
 if(BOOTLOADER_BUILD)
@@ -112,13 +97,23 @@ if(BOOTLOADER_BUILD)
     idf_component_register()
 else()
     # (REQUIRES cannot hide soc headers, since many arguments in the driver headers are chip-dependent)
+    # (Legacy drivers requires `esp_adc`, due to ADC HW resource mutex logics are there.
+    # Can be removed together with legacy drivers)
     idf_component_register(SRCS "${srcs}"
-                        INCLUDE_DIRS ${includes}
-                        PRIV_INCLUDE_DIRS "include/driver"
-                        PRIV_REQUIRES efuse esp_timer
-                        REQUIRES esp_pm esp_ringbuf freertos soc hal esp_hw_support
-                        LDFRAGMENTS linker.lf)
+                           INCLUDE_DIRS ${includes}
+                           PRIV_REQUIRES efuse esp_timer esp_mm
+                           REQUIRES esp_pm esp_ringbuf freertos soc hal esp_hw_support
+                           # for backward compatibility, the driver component needs to
+                           # have a public dependency on other "esp_driver_foo" components
+                                    esp_driver_gpio esp_driver_pcnt esp_driver_gptimer esp_driver_spi esp_driver_mcpwm
+                                    esp_driver_ana_cmpr esp_driver_i2s esp_driver_sdmmc esp_driver_sdspi esp_driver_sdio
+                                    esp_driver_dac esp_driver_rmt esp_driver_tsens esp_driver_sdm esp_driver_i2c
+                                    esp_driver_uart esp_driver_ledc esp_driver_parlio esp_driver_usb_serial_jtag
+                           LDFRAGMENTS ${ldfragments}
+                          )
+    if(CONFIG_SOC_ADC_SUPPORTED AND
+       CONFIG_COMPILER_STATIC_ANALYZER AND CMAKE_C_COMPILER_ID STREQUAL "GNU") # TODO GCC-366
+        set_source_files_properties(deprecated/adc_legacy.c
+                                    PROPERTIES COMPILE_FLAGS "-Wno-analyzer-use-of-uninitialized-value")
+    endif()
 endif()
-
-# uses C11 atomic feature
-set_source_files_properties(spi_master.c PROPERTIES COMPILE_FLAGS -std=gnu11)

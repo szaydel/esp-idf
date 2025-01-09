@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2022 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2022-2023 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Unlicense OR CC0-1.0
  */
@@ -74,6 +74,7 @@ static esp_err_t _decrypt_cb(decrypt_cb_arg_t *args, void *user_ctx)
     if (err != ESP_OK && err != ESP_ERR_NOT_FINISHED) {
         return err;
     }
+
     static bool is_image_verified = false;
     if (pargs.data_out_len > 0) {
         args->data_out = pargs.data_out;
@@ -84,7 +85,11 @@ static esp_err_t _decrypt_cb(decrypt_cb_arg_t *args, void *user_ctx)
             // It is unlikely to not have App Descriptor available in first iteration of decrypt callback.
             assert(args->data_out_len >= app_desc_offset + sizeof(esp_app_desc_t));
             esp_app_desc_t *app_info = (esp_app_desc_t *) &args->data_out[app_desc_offset];
-            return validate_image_header(app_info);
+            err = validate_image_header(app_info);
+            if (err != ESP_OK) {
+                free(pargs.data_out);
+            }
+            return err;
         }
     } else {
         args->data_out_len = 0;
@@ -103,10 +108,13 @@ void pre_encrypted_ota_task(void *pvParameter)
         .cert_pem = server_cert_pem_start,
         .timeout_ms = CONFIG_EXAMPLE_OTA_RECV_TIMEOUT,
         .keep_alive_enable = true,
+#ifdef CONFIG_EXAMPLE_ENABLE_PARTIAL_HTTP_DOWNLOAD
+        .save_client_session = true,
+#endif
     };
     esp_decrypt_cfg_t cfg = {};
-    cfg.rsa_pub_key = rsa_private_pem_start;
-    cfg.rsa_pub_key_len = rsa_private_pem_end - rsa_private_pem_start;
+    cfg.rsa_priv_key = rsa_private_pem_start;
+    cfg.rsa_priv_key_len = rsa_private_pem_end - rsa_private_pem_start;
     esp_decrypt_handle_t decrypt_handle = esp_encrypted_img_decrypt_start(&cfg);
     if (!decrypt_handle) {
         ESP_LOGE(TAG, "OTA upgrade failed");
@@ -139,6 +147,7 @@ void pre_encrypted_ota_task(void *pvParameter)
 #endif
         .decrypt_cb = _decrypt_cb,
         .decrypt_user_ctx = (void *)decrypt_handle,
+        .enc_img_header_size = esp_encrypted_img_get_header_size(),
     };
 
     esp_https_ota_handle_t https_ota_handle = NULL;

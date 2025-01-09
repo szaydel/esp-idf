@@ -53,12 +53,12 @@ The main function also initializes the Bluetooth Controller with default setting
 /* initialize Bluetooth Controller with default configuration */
 esp_bt_controller_config_t bt_cfg = ONTROLLER_INIT_CONFIG_DEFAULT();
 if (esp_bt_controller_init(&bt_cfg) != ESP_OK) {
-    ESP_LOGE(BT_AV_TAG, "%s initialize controller ed\n", __func__);
+    ESP_LOGE(BT_AV_TAG, "%s initialize controller ed", __func__);
     return;
 }
 /* enable Bluetooth Controller in Classic Bluetooth mode */
 if (esp_bt_controller_enable(ESP_BT_MODE_CLASSIC_BT) != OK) {
-    ESP_LOGE(BT_AV_TAG, "%s enable controller failed\n", __func__);
+    ESP_LOGE(BT_AV_TAG, "%s enable controller failed", __func__);
     return;
 }
 ```
@@ -66,16 +66,20 @@ if (esp_bt_controller_enable(ESP_BT_MODE_CLASSIC_BT) != OK) {
 After the initialization of the Bluetooth Controller, the Bluedroid Stack, which includes the common definitions and APIs for Classic Bluetooth is initialized and enabled by using:
 
 ```c
-/* initialize Bluedroid Host */
-if (esp_bluedroid_init() != ESP_OK) {
-    ESP_LOGE(BT_AV_TAG, "%s initialize bluedroid failed\n", __func__);
-    return;
-}
-/* enable Bluedroid Host */
-if (esp_bluedroid_enable() != ESP_OK) {
-    ESP_LOGE(BT_AV_TAG, "%s enable bluedroid failed\n", __func__);
-    return;
-}
+    /* initialize Bluedroid Host */
+    esp_bluedroid_config_t bluedroid_cfg = BT_BLUEDROID_INIT_CONFIG_DEFAULT();
+#if (CONFIG_EXAMPLE_A2DP_SINK_SSP_ENABLED == false)
+    bluedroid_cfg.ssp_en = false;
+#endif
+    if ((err = esp_bluedroid_init_with_cfg(&bluedroid_cfg)) != ESP_OK) {
+        ESP_LOGE(BT_AV_TAG, "%s initialize bluedroid failed: %s", __func__, esp_err_to_name(err));
+        return;
+    }
+    /* enable Bluedroid Host */
+    if (esp_bluedroid_enable() != ESP_OK) {
+        ESP_LOGE(BT_AV_TAG, "%s enable bluedroid failed", __func__);
+        return;
+    }
 ```
 
 The Classic Bluetooth uses an asynchronous programming paradigm. The entire Bluedroid stack sees the use of events, event handlers, callbacks and state machines. Most APIs are implemented by posting specific type of events to the work queue of Bluedroid Stack. Threads(FreeRTOS) tasks inside Bluedroid then process the events with specific handlers, according to the internal state. When the operations are completed, Bluedroid stack invokes the callback function which is registered by application, to report some other events and information.
@@ -87,37 +91,48 @@ For example, after executing `esp_bt_gap_start_discovery()`, an event of `ESP_BT
 The main function installs I2S to play the audio. A loudspeaker, additional ADC or hardware requirements and possibly an external I2S codec may be needed.
 
 ```c
-    /* I2S configuration parameters */
-    i2s_config_t i2s_config = {
-#ifdef CONFIG_EXAMPLE_A2DP_SINK_OUTPUT_INTERNAL_DAC
-        .mode = I2S_MODE_MASTER | I2S_MODE_TX | I2S_MODE_DAC_BUILT_IN,
-#else
-        .mode = I2S_MODE_MASTER | I2S_MODE_TX,              /* only TX */
-#endif
-        .sample_rate = 44100,
-        .bits_per_sample = 16,
-        .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,       /* 2-channels */
-        .communication_format = I2S_COMM_FORMAT_STAND_MSB,
-        .dma_buf_count = 6,
-        .dma_buf_len = 60,
-        .intr_alloc_flags = 0,                              /* default interrupt priority */
-        .tx_desc_auto_clear = true                          /* auto clear tx descriptor on underflow */
-    };
+    #ifdef CONFIG_EXAMPLE_A2DP_SINK_OUTPUT_INTERNAL_DAC
+        /* I2S configuration parameters */
+        i2s_config_t i2s_config = {
+            .mode = I2S_MODE_MASTER | I2S_MODE_TX | I2S_MODE_DAC_BUILT_IN,
+            .sample_rate = 44100,
+            .bits_per_sample = 16,
+            .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,       /* 2-channels */
+            .communication_format = I2S_COMM_FORMAT_STAND_MSB,
+            .dma_buf_count = 6,
+            .dma_buf_len = 60,
+            .intr_alloc_flags = 0,                              /* default interrupt priority */
+            .tx_desc_auto_clear = true                          /* auto clear tx descriptor on underflow */
+        };
 
-    /* enable I2S */
-    i2s_driver_install(0, &i2s_config, 0, NULL);
-#ifdef CONFIG_EXAMPLE_A2DP_SINK_OUTPUT_INTERNAL_DAC
-    i2s_set_dac_mode(I2S_DAC_CHANNEL_BOTH_EN);
-    i2s_set_pin(0, NULL);
-#else
-    i2s_pin_config_t pin_config = {
-        .bck_io_num = CONFIG_EXAMPLE_I2S_BCK_PIN,
-        .ws_io_num = CONFIG_EXAMPLE_I2S_LRCK_PIN,
-        .data_out_num = CONFIG_EXAMPLE_I2S_DATA_PIN,
-        .data_in_num = -1                                   /* not used */
-    };
-    i2s_set_pin(0, &pin_config);
-#endif
+        /* enable I2S */
+        ESP_ERROR_CHECK(i2s_driver_install(0, &i2s_config, 0, NULL));
+        ESP_ERROR_CHECK(i2s_set_dac_mode(I2S_DAC_CHANNEL_BOTH_EN));
+        ESP_ERROR_CHECK(i2s_set_pin(0, NULL));
+    #else
+        i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+        chan_cfg.auto_clear = true;
+        i2s_std_config_t std_cfg = {
+            .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(44100),
+            .slot_cfg = I2S_STD_MSB_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
+            .gpio_cfg = {
+                .mclk = I2S_GPIO_UNUSED,
+                .bclk = CONFIG_EXAMPLE_I2S_BCK_PIN,
+                .ws = CONFIG_EXAMPLE_I2S_LRCK_PIN,
+                .dout = CONFIG_EXAMPLE_I2S_DATA_PIN,
+                .din = I2S_GPIO_UNUSED,
+                .invert_flags = {
+                    .mclk_inv = false,
+                    .bclk_inv = false,
+                    .ws_inv = false,
+                },
+            },
+        };
+        /* enable I2S */
+        ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &tx_chan, NULL));
+        ESP_ERROR_CHECK(i2s_channel_init_std_mode(tx_chan, &std_cfg));
+        ESP_ERROR_CHECK(i2s_channel_enable(tx_chan));
+    #endif
 ```
 
 ### Paring Parameter Settings
@@ -125,7 +140,7 @@ The main function installs I2S to play the audio. A loudspeaker, additional ADC 
 The main function continues to set up paring parameters including Secure Simple Pairing and Legacy Pairing.
 
 ```c
-#if (CONFIG_BT_SSP_ENABLED == true)
+#if (CONFIG_EXAMPLE_A2DP_SINK_SSP_ENABLED == true)
     /* set default parameters for Secure Simple Pairing */
     esp_bt_sp_param_t param_type = ESP_BT_SP_IOCAP_MODE;
     esp_bt_io_cap_t iocap = ESP_BT_IO_CAP_IO;

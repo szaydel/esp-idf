@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2018-2022 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2018-2024 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -13,7 +13,6 @@
 #include "esp_rom_crc.h"
 #include "esp_rom_gpio.h"
 #include "esp_rom_sys.h"
-#include "esp_rom_efuse.h"
 #include "esp_flash_partitions.h"
 #include "bootloader_flash_priv.h"
 #include "bootloader_common.h"
@@ -21,7 +20,6 @@
 #include "soc/gpio_periph.h"
 #include "soc/rtc.h"
 #include "soc/efuse_reg.h"
-#include "soc/soc_caps.h"
 #include "hal/gpio_ll.h"
 #include "esp_image_format.h"
 #include "bootloader_sha.h"
@@ -39,8 +37,8 @@ esp_comm_gpio_hold_t bootloader_common_check_long_hold_gpio(uint32_t num_pin, ui
 esp_comm_gpio_hold_t bootloader_common_check_long_hold_gpio_level(uint32_t num_pin, uint32_t delay_sec, bool level)
 {
     esp_rom_gpio_pad_select_gpio(num_pin);
-    if (GPIO_PIN_MUX_REG[num_pin]) {
-        PIN_INPUT_ENABLE(GPIO_PIN_MUX_REG[num_pin]);
+    if (((1ULL << num_pin) & SOC_GPIO_VALID_GPIO_MASK) != 0) {
+        gpio_ll_input_enable(&GPIO, num_pin);
     }
     esp_rom_gpio_pad_pullup_only(num_pin);
     uint32_t tm_start = esp_log_early_timestamp();
@@ -131,7 +129,7 @@ bool bootloader_common_erase_part_type_data(const char *list_erase, bool ota_dat
                     marker = "no";
                 }
 
-                ESP_LOGI(TAG, "%2d %-16s data  %08x %08x [%s]", i, partition->label,
+                ESP_LOGI(TAG, "%2d %-16s data  %08"PRIx32" %08"PRIx32" [%s]", i, partition->label,
                          partition->pos.offset, partition->pos.size, marker);
             }
         }
@@ -142,13 +140,13 @@ bool bootloader_common_erase_part_type_data(const char *list_erase, bool ota_dat
     return ret;
 }
 
-esp_err_t bootloader_common_get_sha256_of_partition (uint32_t address, uint32_t size, int type, uint8_t *out_sha_256)
+esp_err_t bootloader_common_get_sha256_of_partition(uint32_t address, uint32_t size, int type, uint8_t *out_sha_256)
 {
     if (out_sha_256 == NULL || size == 0) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (type == PART_TYPE_APP) {
+    if (type == PART_TYPE_APP || type == PART_TYPE_BOOTLOADER) {
         const esp_partition_pos_t partition_pos = {
             .offset = address,
             .size = size,
@@ -187,25 +185,4 @@ void bootloader_common_vddsdio_configure(void)
         esp_rom_delay_us(10); // wait for regulator to become stable
     }
 #endif // CONFIG_BOOTLOADER_VDDSDIO_BOOST
-}
-
-RESET_REASON bootloader_common_get_reset_reason(int cpu_no)
-{
-    return (RESET_REASON)esp_rom_get_reset_reason(cpu_no);
-}
-
-uint8_t bootloader_flash_get_cs_io(void)
-{
-#if SOC_SPI_MEM_SUPPORT_CONFIG_GPIO_BY_EFUSE
-    uint8_t cs_io;
-    const uint32_t spiconfig = esp_rom_efuse_get_flash_gpio_info();
-    if (spiconfig == ESP_ROM_EFUSE_FLASH_DEFAULT_SPI) {
-        cs_io = SPI_CS0_GPIO_NUM;
-    } else {
-        cs_io = (spiconfig >> 18) & 0x3f;
-    }
-    return cs_io;
-#else
-    return SPI_CS0_GPIO_NUM;
-#endif
 }

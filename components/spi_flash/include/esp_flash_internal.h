@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2015-2022 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2015-2024 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -8,7 +8,7 @@
 #include "esp_err.h"
 #include <stdint.h>
 #include <stdbool.h>
-#include <driver/spi_common_internal.h>
+#include "esp_private/spi_share_hw_ctrl.h"
 #include "sdkconfig.h"
 
 #include "esp_flash.h"
@@ -24,11 +24,7 @@ extern "C" {
  *
  * Called by OS startup code. You do not need to call this in your own applications.
  */
-#ifdef CONFIG_SPI_FLASH_USE_LEGACY_IMPL
-#define esp_flash_init_default_chip(...) ({ESP_OK;})
-#else
 esp_err_t esp_flash_init_default_chip(void);
-#endif
 
 /**
  *  Enable OS-level SPI flash protections in IDF
@@ -37,11 +33,7 @@ esp_err_t esp_flash_init_default_chip(void);
  *
  * @return ESP_OK if success, otherwise failed. See return value of ``esp_flash_init_os_functions``.
  */
-#ifdef CONFIG_SPI_FLASH_USE_LEGACY_IMPL
-#define esp_flash_app_init(...) ({ESP_OK;})
-#else
 esp_err_t esp_flash_app_init(void);
-#endif
 
 /**
  *  Disable (or enable) OS-level SPI flash protections in IDF
@@ -50,11 +42,7 @@ esp_err_t esp_flash_app_init(void);
  *
  * @return always ESP_OK.
  */
-#ifdef CONFIG_SPI_FLASH_USE_LEGACY_IMPL
-#define esp_flash_app_disable_protect(...) ({ESP_OK;})
-#else
 esp_err_t esp_flash_app_disable_protect(bool disable);
-#endif
 
 /**
  *  Initialize OS-level functions for a specific chip.
@@ -107,7 +95,27 @@ esp_err_t esp_flash_app_enable_os_functions(esp_flash_t* chip);
  */
 esp_err_t esp_flash_app_disable_os_functions(esp_flash_t* chip);
 
-
+/**
+ * @brief Set or clear dangerous write protection check on the flash chip.
+ *
+ * This function sets the runtime option to allow or disallow writing to
+ * dangerous areas such as the bootloader and partition table. If
+ * CONFIG_SPI_FLASH_DANGEROUS_WRITE_ALLOWED is not set, this function allows
+ * the caller to toggle the protection for specific areas.
+ *
+ * If CONFIG_SPI_FLASH_DANGEROUS_WRITE_ALLOWED is set, there is no protection
+ * check in the system, and this function does nothing.
+ *
+ * @param chip The flash chip on which to set the write protection. Only
+ *             "esp_flash_default_chip" is supported.
+ * @param protect Set to true to enable protection against writing in dangerous
+ *                areas (bootloader, partition table). Set to false to disable
+ *                the protection.
+ * @return
+ *         - ESP_OK: Successful operation.
+ *         - ESP_ERR_INVALID_ARG: The chip argument is null.
+ */
+esp_err_t esp_flash_set_dangerous_write_protection(esp_flash_t *chip, const bool protect);
 
 #ifdef __cplusplus
 }

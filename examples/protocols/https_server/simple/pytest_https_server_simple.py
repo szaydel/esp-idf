@@ -1,14 +1,14 @@
 #!/usr/bin/env python
 #
-# SPDX-FileCopyrightText: 2021-2022 Espressif Systems (Shanghai) CO LTD
+# SPDX-FileCopyrightText: 2021-2024 Espressif Systems (Shanghai) CO LTD
 # SPDX-License-Identifier: Apache-2.0
-
 import http.client
 import logging
 import os
 import ssl
 
 import pytest
+from common_test_methods import get_env_config_variable
 from pytest_embedded import Dut
 
 server_cert_pem = '-----BEGIN CERTIFICATE-----\n'\
@@ -91,9 +91,8 @@ success_response = '<h1>Hello Secure World!</h1>'
 
 @pytest.mark.esp32
 @pytest.mark.esp32c3
-@pytest.mark.esp32s2
 @pytest.mark.esp32s3
-@pytest.mark.wifi
+@pytest.mark.wifi_router
 def test_examples_protocol_https_server_simple(dut: Dut) -> None:
     """
     steps: |
@@ -106,12 +105,17 @@ def test_examples_protocol_https_server_simple(dut: Dut) -> None:
     bin_size = os.path.getsize(binary_file)
     logging.info('https_server_simple_bin_size : {}KB'.format(bin_size // 1024))
     # start test
+    logging.info('Waiting to connect with AP')
+    if dut.app.sdkconfig.get('EXAMPLE_WIFI_SSID_PWD_FROM_STDIN') is True:
+        dut.expect('Please input ssid password:')
+        env_name = 'wifi_router'
+        ap_ssid = get_env_config_variable(env_name, 'ap_ssid')
+        ap_password = get_env_config_variable(env_name, 'ap_password')
+        dut.write(f'{ap_ssid} {ap_password}')
     # Parse IP address and port of the server
     dut.expect(r'Starting server')
     got_port = int(dut.expect(r'Server listening on port (\d+)', timeout=30)[1].decode())
-    logging.info('Waiting to connect with AP')
-
-    got_ip = dut.expect(r'IPv4 address: (\d+\.\d+\.\d+\.\d+)', timeout=30)[1].decode()
+    got_ip = dut.expect(r'IPv4 address: (\d+\.\d+\.\d+\.\d+)[^\d]', timeout=30)[1].decode()
 
     # Expected logs
 
@@ -128,7 +132,7 @@ def test_examples_protocol_https_server_simple(dut: Dut) -> None:
     ssl_context.check_hostname = False
     ssl_context.load_verify_locations(cadata=server_cert_pem)
 
-    with open(CLIENT_CERT_FILE, 'w') as cert, open(CLIENT_KEY_FILE, 'w') as key:
+    with open(CLIENT_CERT_FILE, 'w', encoding='utf-8') as cert, open(CLIENT_KEY_FILE, 'w', encoding='utf-8') as key:
         cert.write(client_cert_pem)
         key.write(client_key_pem)
 
@@ -144,42 +148,46 @@ def test_examples_protocol_https_server_simple(dut: Dut) -> None:
         logging.info('Response obtained does not match with correct response')
         raise RuntimeError('Failed to test SSL connection')
 
-    current_cipher = dut.expect(r'Current Ciphersuite(.*)', timeout=5)[0]
-    logging.info('Current Ciphersuite {}'.format(current_cipher))
+    if dut.app.sdkconfig.get('CONFIG_EXAMPLE_ENABLE_HTTPS_USER_CALLBACK') is True:
+        current_cipher = dut.expect(r'Current Ciphersuite(.*)', timeout=5)[0]
+        logging.info('Current Ciphersuite {}'.format(current_cipher))
+
+        logging.info('Checking user callback: Obtaining client certificate...')
+
+        serial_number = dut.expect(r'serial number\s*:([^\n]*)', timeout=5)[0]
+        issuer_name = dut.expect(r'issuer name\s*:([^\n]*)', timeout=5)[0]
+        expiry = dut.expect(r'expires on ((.*)\d{4}\-(0?[1-9]|1[012])\-(0?[1-9]|[12][0-9]|3[01])*)', timeout=5)[1].decode()
+
+        logging.info('Serial No. {}'.format(serial_number))
+        logging.info('Issuer Name {}'.format(issuer_name))
+        logging.info('Expires on {}'.format(expiry))
 
     # Close the connection
     conn.close()
-
-    logging.info('Checking user callback: Obtaining client certificate...')
-
-    serial_number = dut.expect(r'serial number(.*)', timeout=5)[0]
-    issuer_name = dut.expect(r'issuer name(.*)', timeout=5)[0]
-    expiry = dut.expect(r'expires on ((.*)\d{4}\-(0?[1-9]|1[012])\-(0?[1-9]|[12][0-9]|3[01])*)', timeout=5)[1].decode()
-
-    logging.info('Serial No. {}'.format(serial_number))
-    logging.info('Issuer Name {}'.format(issuer_name))
-    logging.info('Expires on {}'.format(expiry))
-
     logging.info('Correct response obtained')
     logging.info('SSL connection test successful\nClosing the connection')
 
 
 @pytest.mark.esp32
 @pytest.mark.esp32c3
-@pytest.mark.esp32s2
 @pytest.mark.esp32s3
-@pytest.mark.wifi
+@pytest.mark.wifi_router
 @pytest.mark.parametrize('config', ['dynamic_buffer',], indirect=True)
 def test_examples_protocol_https_server_simple_dynamic_buffers(dut: Dut) -> None:
     # Test with mbedTLS dynamic buffer feature
 
     # start test
+    logging.info('Waiting to connect with AP')
+    if dut.app.sdkconfig.get('EXAMPLE_WIFI_SSID_PWD_FROM_STDIN') is True:
+        dut.expect('Please input ssid password:')
+        env_name = 'wifi_router'
+        ap_ssid = get_env_config_variable(env_name, 'ap_ssid')
+        ap_password = get_env_config_variable(env_name, 'ap_password')
+        dut.write(f'{ap_ssid} {ap_password}')
     # Parse IP address and port of the server
     dut.expect(r'Starting server')
     got_port = int(dut.expect(r'Server listening on port (\d+)', timeout=30)[1].decode())
-    logging.info('Waiting to connect with AP')
-
-    got_ip = dut.expect(r'IPv4 address: (\d+\.\d+\.\d+\.\d+)', timeout=30)[1].decode()
+    got_ip = dut.expect(r'IPv4 address: (\d+\.\d+\.\d+\.\d+)[^\d]', timeout=30)[1].decode()
 
     # Expected logs
 
@@ -211,21 +219,21 @@ def test_examples_protocol_https_server_simple_dynamic_buffers(dut: Dut) -> None
         logging.info('Response obtained does not match with correct response')
         raise RuntimeError('Failed to test SSL connection')
 
-    current_cipher = dut.expect(r'Current Ciphersuite(.*)', timeout=5)[0]
-    logging.info('Current Ciphersuite {}'.format(current_cipher))
+    if dut.app.sdkconfig.get('CONFIG_EXAMPLE_ENABLE_HTTPS_USER_CALLBACK') is True:
+        current_cipher = dut.expect(r'Current Ciphersuite(.*)', timeout=5)[0]
+        logging.info('Current Ciphersuite {}'.format(current_cipher))
+
+        logging.info('Checking user callback: Obtaining client certificate...')
+
+        serial_number = dut.expect(r'serial number\s*:([^\n]*)', timeout=5)[0]
+        issuer_name = dut.expect(r'issuer name\s*:([^\n]*)', timeout=5)[0]
+        expiry = dut.expect(r'expires on\s*:((.*)\d{4}\-(0?[1-9]|1[012])\-(0?[1-9]|[12][0-9]|3[01])*)', timeout=5)[1].decode()
+
+        logging.info('Serial No. : {}'.format(serial_number))
+        logging.info('Issuer Name : {}'.format(issuer_name))
+        logging.info('Expires on : {}'.format(expiry))
 
     # Close the connection
     conn.close()
-
-    logging.info('Checking user callback: Obtaining client certificate...')
-
-    serial_number = dut.expect(r'serial number(.*)', timeout=5)[0]
-    issuer_name = dut.expect(r'issuer name(.*)', timeout=5)[0]
-    expiry = dut.expect(r'expires on ((.*)\d{4}\-(0?[1-9]|1[012])\-(0?[1-9]|[12][0-9]|3[01])*)', timeout=5)[1].decode()
-
-    logging.info('Serial No. : {}'.format(serial_number))
-    logging.info('Issuer Name : {}'.format(issuer_name))
-    logging.info('Expires on : {}'.format(expiry))
-
     logging.info('Correct response obtained')
     logging.info('SSL connection test successful\nClosing the connection')

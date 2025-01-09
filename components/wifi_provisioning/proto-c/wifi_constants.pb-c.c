@@ -7,6 +7,51 @@
 #endif
 
 #include "wifi_constants.pb-c.h"
+void   wifi_attempt_failed__init
+                     (WifiAttemptFailed         *message)
+{
+  static const WifiAttemptFailed init_value = WIFI_ATTEMPT_FAILED__INIT;
+  *message = init_value;
+}
+size_t wifi_attempt_failed__get_packed_size
+                     (const WifiAttemptFailed *message)
+{
+  assert(message->base.descriptor == &wifi_attempt_failed__descriptor);
+  return protobuf_c_message_get_packed_size ((const ProtobufCMessage*)(message));
+}
+size_t wifi_attempt_failed__pack
+                     (const WifiAttemptFailed *message,
+                      uint8_t       *out)
+{
+  assert(message->base.descriptor == &wifi_attempt_failed__descriptor);
+  return protobuf_c_message_pack ((const ProtobufCMessage*)message, out);
+}
+size_t wifi_attempt_failed__pack_to_buffer
+                     (const WifiAttemptFailed *message,
+                      ProtobufCBuffer *buffer)
+{
+  assert(message->base.descriptor == &wifi_attempt_failed__descriptor);
+  return protobuf_c_message_pack_to_buffer ((const ProtobufCMessage*)message, buffer);
+}
+WifiAttemptFailed *
+       wifi_attempt_failed__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data)
+{
+  return (WifiAttemptFailed *)
+     protobuf_c_message_unpack (&wifi_attempt_failed__descriptor,
+                                allocator, len, data);
+}
+void   wifi_attempt_failed__free_unpacked
+                     (WifiAttemptFailed *message,
+                      ProtobufCAllocator *allocator)
+{
+  if(!message)
+    return;
+  assert(message->base.descriptor == &wifi_attempt_failed__descriptor);
+  protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
+}
 void   wifi_connected_state__init
                      (WifiConnectedState         *message)
 {
@@ -52,6 +97,44 @@ void   wifi_connected_state__free_unpacked
   assert(message->base.descriptor == &wifi_connected_state__descriptor);
   protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
 }
+static const ProtobufCFieldDescriptor wifi_attempt_failed__field_descriptors[1] =
+{
+  {
+    "attempts_remaining",
+    1,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(WifiAttemptFailed, attempts_remaining),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+};
+static const unsigned wifi_attempt_failed__field_indices_by_name[] = {
+  0,   /* field[0] = attempts_remaining */
+};
+static const ProtobufCIntRange wifi_attempt_failed__number_ranges[1 + 1] =
+{
+  { 1, 0 },
+  { 0, 1 }
+};
+const ProtobufCMessageDescriptor wifi_attempt_failed__descriptor =
+{
+  PROTOBUF_C__MESSAGE_DESCRIPTOR_MAGIC,
+  "WifiAttemptFailed",
+  "WifiAttemptFailed",
+  "WifiAttemptFailed",
+  "",
+  sizeof(WifiAttemptFailed),
+  1,
+  wifi_attempt_failed__field_descriptors,
+  wifi_attempt_failed__field_indices_by_name,
+  1,  wifi_attempt_failed__number_ranges,
+  (ProtobufCMessageInit) wifi_attempt_failed__init,
+  NULL,NULL,NULL    /* reserved[123] */
+};
 static const ProtobufCFieldDescriptor wifi_connected_state__field_descriptors[5] =
 {
   {
@@ -202,7 +285,7 @@ const ProtobufCEnumDescriptor wifi_connect_failed_reason__descriptor =
   wifi_connect_failed_reason__value_ranges,
   NULL,NULL,NULL,NULL   /* reserved[1234] */
 };
-static const ProtobufCEnumValue wifi_auth_mode__enum_values_by_number[6] =
+static const ProtobufCEnumValue wifi_auth_mode__enum_values_by_number[8] =
 {
   { "Open", "WIFI_AUTH_MODE__Open", 0 },
   { "WEP", "WIFI_AUTH_MODE__WEP", 1 },
@@ -210,16 +293,20 @@ static const ProtobufCEnumValue wifi_auth_mode__enum_values_by_number[6] =
   { "WPA2_PSK", "WIFI_AUTH_MODE__WPA2_PSK", 3 },
   { "WPA_WPA2_PSK", "WIFI_AUTH_MODE__WPA_WPA2_PSK", 4 },
   { "WPA2_ENTERPRISE", "WIFI_AUTH_MODE__WPA2_ENTERPRISE", 5 },
+  { "WPA3_PSK", "WIFI_AUTH_MODE__WPA3_PSK", 6 },
+  { "WPA2_WPA3_PSK", "WIFI_AUTH_MODE__WPA2_WPA3_PSK", 7 },
 };
 static const ProtobufCIntRange wifi_auth_mode__value_ranges[] = {
-{0, 0},{0, 6}
+{0, 0},{0, 8}
 };
-static const ProtobufCEnumValueIndex wifi_auth_mode__enum_values_by_name[6] =
+static const ProtobufCEnumValueIndex wifi_auth_mode__enum_values_by_name[8] =
 {
   { "Open", 0 },
   { "WEP", 1 },
   { "WPA2_ENTERPRISE", 5 },
   { "WPA2_PSK", 3 },
+  { "WPA2_WPA3_PSK", 7 },
+  { "WPA3_PSK", 6 },
   { "WPA_PSK", 2 },
   { "WPA_WPA2_PSK", 4 },
 };
@@ -230,9 +317,9 @@ const ProtobufCEnumDescriptor wifi_auth_mode__descriptor =
   "WifiAuthMode",
   "WifiAuthMode",
   "",
-  6,
+  8,
   wifi_auth_mode__enum_values_by_number,
-  6,
+  8,
   wifi_auth_mode__enum_values_by_name,
   1,
   wifi_auth_mode__value_ranges,

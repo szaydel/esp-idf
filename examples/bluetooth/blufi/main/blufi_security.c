@@ -16,7 +16,9 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "esp_random.h"
+#if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
 #include "esp_bt.h"
+#endif
 
 #include "esp_blufi_api.h"
 #include "blufi_example.h"
@@ -104,18 +106,25 @@ void blufi_dh_negotiate_data_handler(uint8_t *data, int len, uint8_t **output_da
         }
         free(blufi_sec->dh_param);
         blufi_sec->dh_param = NULL;
-        ret = mbedtls_dhm_make_public(&blufi_sec->dhm, (int) mbedtls_mpi_size( &blufi_sec->dhm.MBEDTLS_PRIVATE(P) ), blufi_sec->self_public_key, mbedtls_mpi_size( &blufi_sec->dhm.MBEDTLS_PRIVATE(P) ), myrand, NULL);
+
+        const int dhm_len = mbedtls_dhm_get_len(&blufi_sec->dhm);
+        ret = mbedtls_dhm_make_public(&blufi_sec->dhm, dhm_len, blufi_sec->self_public_key, dhm_len, myrand, NULL);
         if (ret) {
             BLUFI_ERROR("%s make public failed %d\n", __func__, ret);
             btc_blufi_report_error(ESP_BLUFI_MAKE_PUBLIC_ERROR);
             return;
         }
 
-        mbedtls_dhm_calc_secret( &blufi_sec->dhm,
+        ret = mbedtls_dhm_calc_secret( &blufi_sec->dhm,
                 blufi_sec->share_key,
                 SHARE_KEY_BIT_LEN,
                 &blufi_sec->share_len,
-                NULL, NULL);
+                myrand, NULL);
+        if (ret) {
+            BLUFI_ERROR("%s mbedtls_dhm_calc_secret failed %d\n", __func__, ret);
+            btc_blufi_report_error(ESP_BLUFI_DH_PARAM_ERROR);
+            return;
+        }
 
         ret = mbedtls_md5(blufi_sec->share_key, blufi_sec->share_len, blufi_sec->psk);
 
@@ -129,7 +138,7 @@ void blufi_dh_negotiate_data_handler(uint8_t *data, int len, uint8_t **output_da
 
         /* alloc output data */
         *output_data = &blufi_sec->self_public_key[0];
-        *output_len = mbedtls_mpi_size( &blufi_sec->dhm.MBEDTLS_PRIVATE(P) );
+        *output_len = dhm_len;
         *need_free = false;
 
     }

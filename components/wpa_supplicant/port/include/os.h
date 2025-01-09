@@ -14,12 +14,14 @@
 
 #ifndef OS_H
 #define OS_H
+#include <sys/types.h>
 #include "esp_types.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include "esp_err.h"
 #include "supplicant_opt.h"
+#include "esp_private/esp_wifi_private.h"
 #include "esp_wifi.h"
 
 typedef time_t os_time_t;
@@ -281,9 +283,6 @@ char * ets_strdup(const char *s);
 #ifndef os_strncmp
 #define os_strncmp(s1, s2, n) strncmp((s1), (s2), (n))
 #endif
-#ifndef os_strncpy
-#define os_strncpy(d, s, n) strncpy((d), (s), (n))
-#endif
 #ifndef os_strrchr
 #define os_strrchr(s, c)  strrchr((s), (c))
 #endif
@@ -349,11 +348,15 @@ extern const wifi_osi_funcs_t *wifi_funcs;
 #define os_mutex_lock(a) wifi_funcs->_mutex_lock((a))
 #define os_mutex_unlock(a) wifi_funcs->_mutex_unlock((a))
 #define os_recursive_mutex_create() wifi_funcs->_recursive_mutex_create()
+#define os_mutex_create() wifi_funcs->_mutex_create();
+#define os_mutex_delete(a) wifi_funcs->_mutex_delete(a)
 
 #define os_queue_create(a, b) wifi_funcs->_queue_create((a), (b))
 #define os_queue_delete(a) wifi_funcs->_queue_delete(a)
 #define os_queue_send(a, b, c) wifi_funcs->_queue_send((a), (b), (c))
+#define os_queue_send_to_front(a, b, c) wifi_funcs->_queue_send_to_front((a), (b), (c))
 #define os_queue_recv(a, b, c) wifi_funcs->_queue_recv((a), (b), (c))
+#define os_queue_msg_waiting(a) wifi_funcs->_queue_msg_waiting((a))
 
 #define os_task_create(a,b,c,d,e,f) wifi_funcs->_task_create((a), (b), (c), (d), (e), (f))
 #define os_task_delete(a) wifi_funcs->_task_delete((a))
@@ -366,6 +369,12 @@ extern const wifi_osi_funcs_t *wifi_funcs;
 
 #define os_task_ms_to_tick(a) wifi_funcs->_task_ms_to_tick((a))
 #define os_timer_get_time(void) wifi_funcs->_esp_timer_get_time(void)
+
+#define os_event_group_create(void) wifi_funcs->_event_group_create(void)
+#define os_event_group_delete(void) wifi_funcs->_event_group_delete(void)
+#define os_event_group_wait_bits(a, b, c, d, e) wifi_funcs->_event_group_wait_bits((a), (b), (c), (d), (e))
+#define os_event_group_clear_bits(a, b) wifi_funcs->_event_group_clear_bits((a), (b))
+#define os_event_group_set_bits(a, b) wifi_funcs->_event_group_set_bits((a), (b))
 
 static inline void os_timer_setfn(void *ptimer, void *pfunction, void *parg)
 {

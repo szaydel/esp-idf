@@ -1,48 +1,18 @@
-// Copyright 2020 Espressif Systems (Shanghai) PTE LTD
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+/*
+ * SPDX-FileCopyrightText: 2020-2024 Espressif Systems (Shanghai) CO LTD
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
+#include <stddef.h>
 #include "soc/spi_periph.h"
-#include "stddef.h"
 
 /*
  Bunch of constants for every SPI peripheral: GPIO signals, irqs, hw addr of registers etc
 */
 const spi_signal_conn_t spi_periph_signal[SOC_SPI_PERIPH_NUM] = {
     {
-        .spiclk_out = SPICLK_OUT_MUX_IDX,
-        .spiclk_in = 0,/* SPI clock is not an input signal*/
-        .spid_out = SPID_OUT_IDX,
-        .spiq_out = SPIQ_OUT_IDX,
-        .spiwp_out = SPIWP_OUT_IDX,
-        .spihd_out = SPIHD_OUT_IDX,
-        .spid_in = SPID_IN_IDX,
-        .spiq_in = SPIQ_IN_IDX,
-        .spiwp_in = SPIWP_IN_IDX,
-        .spihd_in = SPIHD_IN_IDX,
-        .spics_out = {SPICS0_OUT_IDX, SPICS1_OUT_IDX},/* SPI0/1 do not have CS2 now */
-        .spics_in = 0,/* SPI cs is not an input signal*/
-        .spiclk_iomux_pin = SPI_IOMUX_PIN_NUM_CLK,
-        .spid_iomux_pin = SPI_IOMUX_PIN_NUM_MOSI,
-        .spiq_iomux_pin = SPI_IOMUX_PIN_NUM_MISO,
-        .spiwp_iomux_pin = SPI_IOMUX_PIN_NUM_WP,
-        .spihd_iomux_pin = SPI_IOMUX_PIN_NUM_HD,
-        .spics0_iomux_pin = SPI_IOMUX_PIN_NUM_CS,
-        .irq = ETS_SPI1_INTR_SOURCE,
-        .irq_dma = -1,
-        .module = PERIPH_SPI_MODULE,
-        .hw = (spi_dev_t *) &SPIMEM1,
-        .func = SPI_FUNC_NUM,
+        // MSPI has dedicated iomux pins
     }, {
         .spiclk_out = FSPICLK_OUT_IDX,
         .spiclk_in = FSPICLK_IN_IDX,
@@ -54,7 +24,7 @@ const spi_signal_conn_t spi_periph_signal[SOC_SPI_PERIPH_NUM] = {
         .spiq_in = FSPIQ_IN_IDX,
         .spiwp_in = FSPIWP_IN_IDX,
         .spihd_in = FSPIHD_IN_IDX,
-        .spics_out = {FSPICS0_OUT_IDX, FSPICS1_OUT_IDX, FSPICS2_OUT_IDX},
+        .spics_out = {FSPICS0_OUT_IDX, FSPICS1_OUT_IDX, FSPICS2_OUT_IDX, FSPICS3_OUT_IDX, FSPICS4_OUT_IDX, FSPICS5_OUT_IDX},
         .spics_in = FSPICS0_IN_IDX,
         .spiclk_iomux_pin = SPI2_IOMUX_PIN_NUM_CLK,
         .spid_iomux_pin = SPI2_IOMUX_PIN_NUM_MOSI,
@@ -62,10 +32,54 @@ const spi_signal_conn_t spi_periph_signal[SOC_SPI_PERIPH_NUM] = {
         .spiwp_iomux_pin = SPI2_IOMUX_PIN_NUM_WP,
         .spihd_iomux_pin = SPI2_IOMUX_PIN_NUM_HD,
         .spics0_iomux_pin = SPI2_IOMUX_PIN_NUM_CS,
-        .irq = ETS_SPI2_INTR_SOURCE,
+        .irq = ETS_GSPI2_INTR_SOURCE,
         .irq_dma = -1,
-        .module = PERIPH_SPI2_MODULE,
         .hw = &GPSPI2,
         .func = SPI2_FUNC_NUM,
     }
+};
+
+/**
+ * Backup registers in Light sleep: (total cnt 29)
+ *
+ * cmd
+ * addr
+ * ctrl
+ * clock
+ * user
+ * user1
+ * user2
+ * ms_dlen
+ * misc
+ * dma_conf
+ * dma_int_ena
+ * data_buf[0-15]   // slave driver only
+ * slave
+ * slave1
+ */
+#define SPI_RETENTION_REGS_CNT 29
+static const uint32_t spi_regs_map[4] = {0x31ff, 0x33fffc0, 0x0, 0x0};
+#define SPI_REG_RETENTION_ENTRIES(num) { \
+    [0] = { .config = REGDMA_LINK_ADDR_MAP_INIT(REGDMA_GPSPI_LINK(0), \
+                                               REG_SPI_BASE(num), REG_SPI_BASE(num), \
+                                               SPI_RETENTION_REGS_CNT, 0, 0, \
+                                               spi_regs_map[0], spi_regs_map[1], \
+                                               spi_regs_map[2], spi_regs_map[3]), \
+            .owner = ENTRY(0) | ENTRY(2) }, \
+    /* Additional interrupt setting is required by idf SPI drivers after register recovered */ \
+    [1] = { .config = REGDMA_LINK_WRITE_INIT(REGDMA_GPSPI_LINK(1), \
+                                            SPI_DMA_INT_SET_REG(num), \
+                                            SPI_TRANS_DONE_INT_SET | SPI_DMA_SEG_TRANS_DONE_INT_SET | SPI_SLV_CMD7_INT_SET | SPI_SLV_CMD8_INT_SET , \
+                                            UINT32_MAX, 1, 0), \
+            .owner = ENTRY(0) | ENTRY(2) }, \
+}
+
+static const regdma_entries_config_t spi2_regs_retention[] = SPI_REG_RETENTION_ENTRIES(2);   // '2' for GPSPI2
+
+const spi_reg_retention_info_t spi_reg_retention_info[SOC_SPI_PERIPH_NUM - 1] = {   // '-1' to except mspi
+    {
+        .module_id = SLEEP_RETENTION_MODULE_GPSPI2,
+        .entry_array = spi2_regs_retention,
+        .array_size = ARRAY_SIZE(spi2_regs_retention),
+    },
 };
