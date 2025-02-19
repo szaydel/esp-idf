@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2015-2022 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2015-2024 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -14,12 +14,18 @@
 #include "esp_image_format.h"
 #include "esp_efuse.h"
 #include "esp_efuse_table.h"
+#include "secure_boot_signature_priv.h"
+
 
 /* The following API implementations are used only when called
  * from the bootloader code.
  */
 
 #ifdef CONFIG_SECURE_BOOT_V2_ENABLED
+
+#if CONFIG_SECURE_ENABLE_TEE
+extern esp_image_metadata_t tee_data;
+#endif
 
 #define ALIGN_UP(num, align) (((num) + ((align) - 1)) & ~((align) - 1))
 static const char *TAG = "secure_boot_v2";
@@ -68,7 +74,7 @@ static esp_err_t s_calculate_image_public_key_digests(uint32_t flash_offset, uin
     uint8_t __attribute__((aligned(4))) key_digest[ESP_SECURE_BOOT_DIGEST_LEN] = {0};
     size_t sig_block_addr = flash_offset + ALIGN_UP(flash_size, FLASH_SECTOR_SIZE);
 
-    ESP_LOGD(TAG, "calculating public key digests for sig blocks of image offset 0x%x (sig block offset 0x%x)", flash_offset, sig_block_addr);
+    ESP_LOGD(TAG, "calculating public key digests for sig blocks of image offset 0x%" PRIx32 " (sig block offset 0x%x)", flash_offset, sig_block_addr);
 
     bzero(public_key_digests, sizeof(esp_image_sig_public_key_digests_t));
 
@@ -128,7 +134,7 @@ static esp_err_t s_calculate_image_public_key_digests(uint32_t flash_offset, uin
     }
 
     if (ret == ESP_OK && public_key_digests->num_digests > 0) {
-        ESP_LOGI(TAG, "Digests successfully calculated, %d valid signatures (image offset 0x%x)",
+        ESP_LOGI(TAG, "Digests successfully calculated, %d valid signatures (image offset 0x%" PRIx32 ")",
                  public_key_digests->num_digests, flash_offset);
     }
 
@@ -218,17 +224,24 @@ static esp_err_t check_and_generate_secure_boot_keys(const esp_image_metadata_t 
                 continue;
             }
 #endif
+#ifndef CONFIG_SOC_EFUSE_CONSISTS_OF_ONE_KEY_BLOCK
             if (esp_efuse_get_key_dis_read(blocks[i])) {
                 ESP_LOGE(TAG, "Key digest (BLK%d) read protected, aborting...", blocks[i]);
                 return ESP_FAIL;
             }
+#endif
             if (esp_efuse_block_is_empty(blocks[i])) {
                 ESP_LOGE(TAG, "%d eFuse block is empty, aborting...", blocks[i]);
                 return ESP_FAIL;
             }
             esp_efuse_set_key_dis_write(blocks[i]);
-            ret = esp_efuse_read_block(blocks[i], boot_key_digests.key_digests[boot_key_digests.num_digests], 0,
-                                            sizeof(boot_key_digests.key_digests[0]) * 8);
+#ifdef CONFIG_SOC_EFUSE_CONSISTS_OF_ONE_KEY_BLOCK
+            size_t offset = 128;
+#else
+            size_t offset = 0;
+#endif
+             ret = esp_efuse_read_block(blocks[i], boot_key_digests.key_digests[boot_key_digests.num_digests], offset,
+                                            ESP_SECURE_BOOT_KEY_DIGEST_LEN * 8);
             if (ret) {
                 ESP_LOGE(TAG, "Error during reading %d eFuse block (err=0x%x)", blocks[i], ret);
                 return ret;
@@ -256,8 +269,30 @@ static esp_err_t check_and_generate_secure_boot_keys(const esp_image_metadata_t 
 
     ESP_LOGI(TAG, "%d signature block(s) found appended to the app.", app_key_digests.num_digests);
     if (app_key_digests.num_digests > boot_key_digests.num_digests) {
-        ESP_LOGW(TAG, "App has %d signature blocks but bootloader only has %d. Some keys missing from bootloader?");
+        ESP_LOGW(TAG, "App has %d signature blocks but bootloader only has %d. Some keys missing from bootloader?", app_key_digests.num_digests, boot_key_digests.num_digests);
     }
+
+#if CONFIG_SECURE_ENABLE_TEE
+    /* Generate the TEE public key digests */
+    bool tee_match = false;
+    esp_image_sig_public_key_digests_t tee_key_digests = {0};
+
+    ret = s_calculate_image_public_key_digests(tee_data.start_addr, tee_data.image_len - SIG_BLOCK_PADDING, &tee_key_digests);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "TEE signature block is invalid.");
+        return ret;
+    }
+
+    if (tee_key_digests.num_digests == 0) {
+        ESP_LOGE(TAG, "No valid TEE signature blocks found.");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "%d signature block(s) found appended to the tee.", tee_key_digests.num_digests);
+    if (tee_key_digests.num_digests > boot_key_digests.num_digests) {
+        ESP_LOGW(TAG, "TEE has %d signature blocks but bootloader only has %d. Some keys missing from bootloader?", tee_key_digests.num_digests, boot_key_digests.num_digests);
+    }
+#endif
 
     /* Confirm if at least one public key from the application matches a public key in the bootloader
         (Also, ensure if that public revoke bit is not set for the matched key) */
@@ -271,17 +306,36 @@ static esp_err_t check_and_generate_secure_boot_keys(const esp_image_metadata_t 
         }
 #endif // SOC_EFUSE_REVOKE_BOOT_KEY_DIGESTS
         for (unsigned j = 0; j < app_key_digests.num_digests; j++) {
-            if (!memcmp(boot_key_digests.key_digests[i], app_key_digests.key_digests[j], ESP_SECURE_BOOT_DIGEST_LEN)) {
+            if (!memcmp(boot_key_digests.key_digests[i], app_key_digests.key_digests[j], ESP_SECURE_BOOT_KEY_DIGEST_LEN)) {
                 ESP_LOGI(TAG, "Application key(%d) matches with bootloader key(%d).", j, i);
                 match = true;
             }
         }
+#if CONFIG_SECURE_ENABLE_TEE
+        if (!match) {
+             continue;
+        }
+
+        for (unsigned j = 0; j < tee_key_digests.num_digests; j++) {
+            if (!memcmp(boot_key_digests.key_digests[i], tee_key_digests.key_digests[j], ESP_SECURE_BOOT_DIGEST_LEN)) {
+                ESP_LOGI(TAG, "TEE key(%d) matches with bootloader key(%d).", j, i);
+                tee_match = true;
+            }
+        }
+#endif
     }
 
     if (match == false) {
         ESP_LOGE(TAG, "No application key digest matches the bootloader key digest.");
         return ESP_FAIL;
     }
+
+#if CONFIG_SECURE_ENABLE_TEE
+    if (tee_match == false) {
+        ESP_LOGE(TAG, "No TEE key digest matches the bootloader key digest.");
+        return ESP_FAIL;
+    }
+#endif
 
 #if SOC_EFUSE_REVOKE_BOOT_KEY_DIGESTS
     /* Revoke the empty signature blocks */
@@ -331,8 +385,10 @@ esp_err_t esp_secure_boot_v2_permanently_enable(const esp_image_metadata_t *imag
     assert(esp_efuse_read_field_bit(ESP_EFUSE_SECURE_BOOT_AGGRESSIVE_REVOKE));
 #endif
 
+#ifndef CONFIG_SECURE_BOOT_FLASH_ENC_KEYS_BURN_TOGETHER
     assert(esp_secure_boot_enabled());
     ESP_LOGI(TAG, "Secure boot permanently enabled");
+#endif
 
     return ESP_OK;
 }

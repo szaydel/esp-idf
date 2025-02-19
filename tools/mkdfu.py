@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# SPDX-FileCopyrightText: 2020-2022 Espressif Systems (Shanghai) CO LTD
+# SPDX-FileCopyrightText: 2020-2024 Espressif Systems (Shanghai) CO LTD
 # SPDX-License-Identifier: Apache-2.0
 #
 # This program creates archives compatible with ESP32-S* ROM DFU implementation.
@@ -9,9 +9,6 @@
 # as a separate file. In addition to that, a special index file, 'dfuinfo0.dat', is created.
 # This file must be the first one in the archive. It contains binary structures describing each
 # subsequent file (for example, where the file needs to be flashed/loaded).
-
-from __future__ import print_function, unicode_literals
-
 import argparse
 import hashlib
 import json
@@ -20,8 +17,6 @@ import struct
 import zlib
 from collections import namedtuple
 from functools import partial
-
-from future.utils import iteritems
 
 try:
     import typing
@@ -310,11 +305,11 @@ def main():  # type: () -> None
             '''
             return check_file(os.path.relpath(os.path.join(json_dir, path), start=os.curdir))
 
-        with open(args.json) as f:
+        with open(args.json, encoding='utf-8') as f:
             files += [(int(addr, 0),
-                       process_json_file(f_name)) for addr, f_name in iteritems(json.load(f)['flash_files'])]
+                       process_json_file(f_name)) for addr, f_name in json.load(f)['flash_files'].items()]
 
-    files = sorted([(addr, f_name.decode('utf-8') if isinstance(f_name, type(b'')) else f_name) for addr, f_name in iteritems(dict(files))],
+    files = sorted([(addr, f_name) for addr, f_name in dict(files).items()],
                    key=lambda x: x[0])  # remove possible duplicates and sort based on the address
 
     cmd_args = {'output_file': args.output_file,

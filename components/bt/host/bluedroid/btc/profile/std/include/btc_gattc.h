@@ -24,6 +24,7 @@ typedef enum {
     BTC_GATTC_ACT_SEARCH_SERVICE,
     BTC_GATTC_ACT_READ_CHAR,
     BTC_GATTC_ACT_READ_MULTIPLE_CHAR,
+    BTC_GATTC_ACT_READ_MULTIPLE_VARIABLE_CHAR,
     BTC_GATTC_ACT_READ_CHAR_DESCR,
     BTC_GATTC_ACT_READ_BY_TYPE,
     BTC_GATTC_ACT_WRITE_CHAR,
@@ -56,6 +57,11 @@ typedef union {
         esp_ble_addr_type_t remote_addr_type;
         bool is_direct;
         bool is_aux;
+        esp_ble_addr_type_t own_addr_type;
+        esp_ble_phy_mask_t phy_mask;
+        esp_ble_conn_params_t phy_1m_conn_params;
+        esp_ble_conn_params_t phy_2m_conn_params;
+        esp_ble_conn_params_t phy_coded_conn_params;
     } open;
     //BTC_GATTC_ACT_CLOSE,
     struct close_arg {
@@ -195,6 +201,7 @@ typedef union {
 void btc_gattc_call_handler(btc_msg_t *msg);
 void btc_gattc_cb_handler(btc_msg_t *msg);
 void btc_gattc_arg_deep_copy(btc_msg_t *msg, void *p_dest, void *p_src);
+void btc_gattc_arg_deep_free(btc_msg_t *msg);
 esp_gatt_status_t btc_ble_gattc_get_service(uint16_t conn_id, esp_bt_uuid_t *svc_uuid,
                                             esp_gattc_service_elem_t *result,
                                             uint16_t *count, uint16_t offset);

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2015-2022 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2015-2025 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -10,10 +10,14 @@
 
 #pragma once
 
+#include <stdlib.h>
 #include "hal/misc.h"
 #include "hal/uart_types.h"
-#include "soc/uart_periph.h"
+#include "soc/uart_reg.h"
 #include "soc/uart_struct.h"
+#include "soc/system_struct.h"
+#include "soc/system_reg.h"
+#include "soc/dport_access.h"
 #include "esp_attr.h"
 
 #ifdef __cplusplus
@@ -23,10 +27,11 @@ extern "C" {
 // The default fifo depth
 #define UART_LL_FIFO_DEF_LEN  (SOC_UART_FIFO_LEN)
 // Get UART hardware instance with giving uart num
-#define UART_LL_GET_HW(num) (((num) == 0) ? (&UART0) : (((num) == 1) ? (&UART1) : (&UART2)))
+#define UART_LL_GET_HW(num) (((num) == UART_NUM_0) ? (&UART0) : (((num) == UART_NUM_1) ? (&UART1) : (&UART2)))
 
-#define UART_LL_MIN_WAKEUP_THRESH (2)
+#define UART_LL_WAKEUP_EDGE_THRED_MIN (3)
 #define UART_LL_INTR_MASK         (0x7ffff) //All interrupt mask
+#define UART_LL_WAKEUP_EDGE_THRED_MAX(hw) UART_ACTIVE_THRESHOLD_V
 
 #define UART_LL_FSM_IDLE          (0x0)
 #define UART_LL_FSM_TX_WAIT_SEND  (0xf)
@@ -56,16 +61,101 @@ typedef enum {
 } uart_intr_t;
 
 /**
- * @brief  Configure the UART core reset.
+ * @brief Check if UART is enabled or disabled.
+ *
+ * @param uart_num UART port number, the max port number is (UART_NUM_MAX -1).
+ *
+ * @return true: enabled; false: disabled
+ */
+FORCE_INLINE_ATTR bool uart_ll_is_enabled(uint32_t uart_num)
+{
+    uint32_t uart_rst_bit = ((uart_num == 0) ? SYSTEM_UART_RST :
+                            (uart_num == 1) ? SYSTEM_UART1_RST :
+                            (uart_num == 2) ? SYSTEM_UART2_RST : 0);
+    uint32_t uart_en_bit  = ((uart_num == 0) ? SYSTEM_UART_CLK_EN :
+                            (uart_num == 1) ? SYSTEM_UART1_CLK_EN :
+                            (uart_num == 2) ? SYSTEM_UART2_CLK_EN : 0);
+    return DPORT_REG_GET_BIT(SYSTEM_PERIP_RST_EN0_REG, uart_rst_bit) == 0 &&
+        DPORT_REG_GET_BIT(SYSTEM_PERIP_CLK_EN0_REG, uart_en_bit) != 0;
+}
+
+/**
+ * @brief Enable the bus clock for uart
+ * @param uart_num UART port number, the max port number is (UART_NUM_MAX -1).
+ * @param enable true to enable, false to disable
+ */
+static inline void uart_ll_enable_bus_clock(uart_port_t uart_num, bool enable)
+{
+    switch (uart_num) {
+    case 0:
+        SYSTEM.perip_clk_en0.uart_clk_en = enable;
+        break;
+    case 1:
+        SYSTEM.perip_clk_en0.uart1_clk_en = enable;
+        break;
+    case 2:
+        SYSTEM.perip_clk_en1.uart2_clk_en = enable;
+        break;
+    default:
+        abort();
+        break;
+    }
+}
+// SYSTEM.perip_clk_enx are shared registers, so this function must be used in an atomic way
+#define uart_ll_enable_bus_clock(...) (void)__DECLARE_RCC_ATOMIC_ENV; uart_ll_enable_bus_clock(__VA_ARGS__)
+
+/**
+ * @brief Reset UART module
+ * @param uart_num UART port number, the max port number is (UART_NUM_MAX -1).
+ */
+static inline void uart_ll_reset_register(uart_port_t uart_num)
+{
+    // ESP32S3 requires a workaround: enable core reset before enabling uart module clock to prevent uart output garbage value
+    switch (uart_num) {
+    case 0:
+        UART0.clk_conf.rst_core = 1;
+        SYSTEM.perip_rst_en0.uart_rst = 1;
+        SYSTEM.perip_rst_en0.uart_rst = 0;
+        UART0.clk_conf.rst_core = 0;
+        break;
+    case 1:
+        UART1.clk_conf.rst_core = 1;
+        SYSTEM.perip_rst_en0.uart1_rst = 1;
+        SYSTEM.perip_rst_en0.uart1_rst = 0;
+        UART1.clk_conf.rst_core = 0;
+        break;
+    case 2:
+        UART2.clk_conf.rst_core = 1;
+        SYSTEM.perip_rst_en1.uart2_rst = 1;
+        SYSTEM.perip_rst_en1.uart2_rst = 0;
+        UART2.clk_conf.rst_core = 0;
+        break;
+    default:
+        abort();
+        break;
+    }
+}
+// SYSTEM.perip_rst_enx are shared registers, so this function must be used in an atomic way
+#define uart_ll_reset_register(...) (void)__DECLARE_RCC_ATOMIC_ENV; uart_ll_reset_register(__VA_ARGS__)
+
+/**
+ * @brief  Enable the UART clock.
  *
  * @param  hw Beginning address of the peripheral registers.
- * @param  core_rst_en True to enable the core reset, otherwise set it false.
- *
- * @return None.
  */
-static inline void uart_ll_set_reset_core(uart_dev_t *hw, bool core_rst_en)
+FORCE_INLINE_ATTR void uart_ll_sclk_enable(uart_dev_t *hw)
 {
-    hw->clk_conf.rst_core = core_rst_en;
+    (void)hw;
+}
+
+/**
+ * @brief  Disable the UART clock.
+ *
+ * @param  hw Beginning address of the peripheral registers.
+ */
+FORCE_INLINE_ATTR void uart_ll_sclk_disable(uart_dev_t *hw)
+{
+    (void)hw;
 }
 
 /**
@@ -77,10 +167,9 @@ static inline void uart_ll_set_reset_core(uart_dev_t *hw, bool core_rst_en)
  *
  * @return None.
  */
-FORCE_INLINE_ATTR void uart_ll_set_sclk(uart_dev_t *hw, uart_sclk_t source_clk)
+FORCE_INLINE_ATTR void uart_ll_set_sclk(uart_dev_t *hw, soc_module_clk_t source_clk)
 {
     switch (source_clk) {
-        default:
         case UART_SCLK_APB:
             hw->clk_conf.sclk_sel = 1;
             break;
@@ -90,6 +179,9 @@ FORCE_INLINE_ATTR void uart_ll_set_sclk(uart_dev_t *hw, uart_sclk_t source_clk)
         case UART_SCLK_XTAL:
             hw->clk_conf.sclk_sel = 3;
             break;
+        default:
+            // Invalid UART clock source
+            abort();
     }
 }
 
@@ -101,39 +193,19 @@ FORCE_INLINE_ATTR void uart_ll_set_sclk(uart_dev_t *hw, uart_sclk_t source_clk)
  *
  * @return None.
  */
-FORCE_INLINE_ATTR void uart_ll_get_sclk(uart_dev_t *hw, uart_sclk_t *source_clk)
+FORCE_INLINE_ATTR void uart_ll_get_sclk(uart_dev_t *hw, soc_module_clk_t *source_clk)
 {
     switch (hw->clk_conf.sclk_sel) {
         default:
         case 1:
-            *source_clk = UART_SCLK_APB;
+            *source_clk = (soc_module_clk_t)UART_SCLK_APB;
             break;
         case 2:
-            *source_clk = UART_SCLK_RTC;
+            *source_clk = (soc_module_clk_t)UART_SCLK_RTC;
             break;
         case 3:
-            *source_clk = UART_SCLK_XTAL;
+            *source_clk = (soc_module_clk_t)UART_SCLK_XTAL;
             break;
-    }
-}
-
-/**
- * @brief  Get the UART source clock frequency.
- *
- * @param  hw Beginning address of the peripheral registers.
- *
- * @return Current source clock frequency
- */
-FORCE_INLINE_ATTR uint32_t uart_ll_get_sclk_freq(uart_dev_t *hw)
-{
-    switch (hw->clk_conf.sclk_sel) {
-        default:
-        case 1:
-            return APB_CLK_FREQ;
-        case 2:
-            return RTC_CLK_FREQ;
-        case 3:
-            return XTAL_CLK_FREQ;
     }
 }
 
@@ -142,21 +214,23 @@ FORCE_INLINE_ATTR uint32_t uart_ll_get_sclk_freq(uart_dev_t *hw)
  *
  * @param  hw Beginning address of the peripheral registers.
  * @param  baud The baud rate to be set.
+ * @param  sclk_freq Frequency of the clock source of UART, in Hz.
  *
  * @return None
  */
-FORCE_INLINE_ATTR void uart_ll_set_baudrate(uart_dev_t *hw, uint32_t baud)
+FORCE_INLINE_ATTR void uart_ll_set_baudrate(uart_dev_t *hw, uint32_t baud, uint32_t sclk_freq)
 {
 #define DIV_UP(a, b)    (((a) + (b) - 1) / (b))
-    uint32_t sclk_freq = uart_ll_get_sclk_freq(hw);
     const uint32_t max_div = BIT(12) - 1;   // UART divider integer part only has 12 bits
-    int sclk_div = DIV_UP(sclk_freq, max_div * baud);
+    uint32_t sclk_div = DIV_UP(sclk_freq, (uint64_t)max_div * baud);
+
+    if (sclk_div == 0) abort();
 
     uint32_t clk_div = ((sclk_freq) << 4) / (baud * sclk_div);
     // The baud rate configuration register is divided into
     // an integer part and a fractional part.
     hw->clkdiv.clkdiv = clk_div >> 4;
-    hw->clkdiv.clkdiv_frag = clk_div &  0xf;
+    hw->clkdiv.clkdiv_frag = clk_div & 0xf;
     HAL_FORCE_MODIFY_U32_REG_FIELD(hw->clk_conf, sclk_div_num, sclk_div - 1);
 #undef DIV_UP
 }
@@ -165,13 +239,14 @@ FORCE_INLINE_ATTR void uart_ll_set_baudrate(uart_dev_t *hw, uint32_t baud)
  * @brief  Get the current baud-rate.
  *
  * @param  hw Beginning address of the peripheral registers.
+ * @param  sclk_freq Frequency of the clock source of UART, in Hz.
  *
  * @return The current baudrate
  */
-FORCE_INLINE_ATTR uint32_t uart_ll_get_baudrate(uart_dev_t *hw)
+FORCE_INLINE_ATTR uint32_t uart_ll_get_baudrate(uart_dev_t *hw, uint32_t sclk_freq)
 {
-    uint32_t sclk_freq = uart_ll_get_sclk_freq(hw);
-    uart_clkdiv_reg_t div_reg = hw->clkdiv;
+    uart_clkdiv_reg_t div_reg;
+    div_reg.val = hw->clkdiv.val;
     return ((sclk_freq << 4)) /
         (((div_reg.clkdiv << 4) | div_reg.clkdiv_frag) * (HAL_FORCE_READ_U32_REG_FIELD(hw->clk_conf, sclk_div_num) + 1));
 }
@@ -186,7 +261,7 @@ FORCE_INLINE_ATTR uint32_t uart_ll_get_baudrate(uart_dev_t *hw)
  */
 FORCE_INLINE_ATTR void uart_ll_ena_intr_mask(uart_dev_t *hw, uint32_t mask)
 {
-    hw->int_ena.val |= mask;
+    hw->int_ena.val = hw->int_ena.val | mask;
 }
 
 /**
@@ -199,7 +274,19 @@ FORCE_INLINE_ATTR void uart_ll_ena_intr_mask(uart_dev_t *hw, uint32_t mask)
  */
 FORCE_INLINE_ATTR void uart_ll_disable_intr_mask(uart_dev_t *hw, uint32_t mask)
 {
-    hw->int_ena.val &= (~mask);
+    hw->int_ena.val = hw->int_ena.val & (~mask);
+}
+
+/**
+ * @brief  Get the UART raw interrupt status.
+ *
+ * @param  hw Beginning address of the peripheral registers.
+ *
+ * @return The UART interrupt status.
+ */
+static inline uint32_t uart_ll_get_intraw_mask(uart_dev_t *hw)
+{
+    return hw->int_raw.val;
 }
 
 /**
@@ -260,14 +347,17 @@ FORCE_INLINE_ATTR void uart_ll_read_rxfifo(uart_dev_t *hw, uint8_t *buf, uint32_
  *
  * @param  hw Beginning address of the peripheral registers.
  * @param  buf The data buffer.
- * @param  wr_len The data length needs to be writen.
+ * @param  wr_len The data length needs to be written.
  *
  * @return None
  */
 FORCE_INLINE_ATTR void uart_ll_write_txfifo(uart_dev_t *hw, const uint8_t *buf, uint32_t wr_len)
 {
+    // Write to the FIFO should make sure only involve write operation, any read operation would cause data lost.
+    // Non-32-bit access would lead to a read-modify-write operation to the register, which is undesired.
+    // Therefore, use 32-bit access to avoid any potential problem.
     for (int i = 0; i < (int)wr_len; i++) {
-        hw->fifo.rxfifo_rd_byte = buf[i];
+        hw->fifo.val = (int)buf[i];
     }
 }
 
@@ -344,7 +434,7 @@ FORCE_INLINE_ATTR void uart_ll_set_stop_bits(uart_dev_t *hw, uart_stop_bits_t st
  */
 FORCE_INLINE_ATTR void uart_ll_get_stop_bits(uart_dev_t *hw, uart_stop_bits_t *stop_bit)
 {
-    *stop_bit = hw->conf0.stop_bit_num;
+    *stop_bit = (uart_stop_bits_t)hw->conf0.stop_bit_num;
 }
 
 /**
@@ -374,7 +464,7 @@ FORCE_INLINE_ATTR void uart_ll_set_parity(uart_dev_t *hw, uart_parity_t parity_m
 FORCE_INLINE_ATTR void uart_ll_get_parity(uart_dev_t *hw, uart_parity_t *parity_mode)
 {
     if (hw->conf0.parity_en) {
-        *parity_mode = 0X2 | hw->conf0.parity;
+        *parity_mode = (uart_parity_t)(0x2 | hw->conf0.parity);
     } else {
         *parity_mode = UART_PARITY_DISABLE;
     }
@@ -436,7 +526,7 @@ FORCE_INLINE_ATTR void uart_ll_set_tx_idle_num(uart_dev_t *hw, uint32_t idle_num
 }
 
 /**
- * @brief  Configure the transmiter to send break chars.
+ * @brief  Configure the transmitter to send break chars.
  *
  * @param  hw Beginning address of the peripheral registers.
  * @param  break_num The number of the break chars need to be send.
@@ -489,10 +579,10 @@ FORCE_INLINE_ATTR void uart_ll_get_hw_flow_ctrl(uart_dev_t *hw, uart_hw_flowcont
 {
     *flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
     if (hw->conf1.rx_flow_en) {
-        *flow_ctrl |= UART_HW_FLOWCTRL_RTS;
+        *flow_ctrl = (uart_hw_flowcontrol_t)((unsigned int)(*flow_ctrl) | (unsigned int)UART_HW_FLOWCTRL_RTS);
     }
     if (hw->conf0.tx_flow_en) {
-        *flow_ctrl |= UART_HW_FLOWCTRL_CTS;
+        *flow_ctrl = (uart_hw_flowcontrol_t)((unsigned int)(*flow_ctrl) | (unsigned int)UART_HW_FLOWCTRL_CTS);
     }
 }
 
@@ -500,7 +590,7 @@ FORCE_INLINE_ATTR void uart_ll_get_hw_flow_ctrl(uart_dev_t *hw, uart_hw_flowcont
  * @brief  Configure the software flow control.
  *
  * @param  hw Beginning address of the peripheral registers.
- * @param  flow_ctrl The UART sofware flow control settings.
+ * @param  flow_ctrl The UART software flow control settings.
  * @param  sw_flow_ctrl_en Set true to enable software flow control, otherwise set it false.
  *
  * @return None.
@@ -512,8 +602,8 @@ FORCE_INLINE_ATTR void uart_ll_set_sw_flow_ctrl(uart_dev_t *hw, uart_sw_flowctrl
         hw->flow_conf.sw_flow_con_en = 1;
         hw->swfc_conf1.xon_threshold = flow_ctrl->xon_thrd;
         hw->swfc_conf0.xoff_threshold = flow_ctrl->xoff_thrd;
-        HAL_FORCE_MODIFY_U32_REG_FIELD(hw->swfc_conf1, xon_char, flow_ctrl->xon_char);
-        HAL_FORCE_MODIFY_U32_REG_FIELD(hw->swfc_conf0, xoff_char, flow_ctrl->xoff_char);
+        HAL_FORCE_MODIFY_U32_REG_FIELD(hw->swfc_conf1, xon_character, flow_ctrl->xon_char);
+        HAL_FORCE_MODIFY_U32_REG_FIELD(hw->swfc_conf0, xoff_character, flow_ctrl->xoff_char);
     } else {
         hw->flow_conf.sw_flow_con_en = 0;
         hw->flow_conf.xonoff_del = 0;
@@ -535,8 +625,8 @@ FORCE_INLINE_ATTR void uart_ll_set_sw_flow_ctrl(uart_dev_t *hw, uart_sw_flowctrl
  */
 FORCE_INLINE_ATTR void uart_ll_set_at_cmd_char(uart_dev_t *hw, uart_at_cmd_t *cmd_char)
 {
-    HAL_FORCE_MODIFY_U32_REG_FIELD(hw->at_cmd_char, at_cmd_char, cmd_char->cmd_char);
-    HAL_FORCE_MODIFY_U32_REG_FIELD(hw->at_cmd_char, char_num, cmd_char->char_num);
+    HAL_FORCE_MODIFY_U32_REG_FIELD(hw->at_cmd_char, data, cmd_char->cmd_char);
+    HAL_FORCE_MODIFY_U32_REG_FIELD(hw->at_cmd_char, at_char_num, cmd_char->char_num);
     HAL_FORCE_MODIFY_U32_REG_FIELD(hw->at_cmd_postcnt, post_idle_num, cmd_char->post_idle);
     HAL_FORCE_MODIFY_U32_REG_FIELD(hw->at_cmd_precnt, pre_idle_num, cmd_char->pre_idle);
     HAL_FORCE_MODIFY_U32_REG_FIELD(hw->at_cmd_gaptout, rx_gap_tout, cmd_char->gap_tout);
@@ -556,7 +646,6 @@ FORCE_INLINE_ATTR void uart_ll_set_data_bit_num(uart_dev_t *hw, uart_word_length
 }
 
 /**
-FORCE_INLINE_ATTR void uart_ll_get_sclk(uart_dev_t *hw, uart_sclk_t *source_clk)
  * @brief  Set the rts active level.
  *
  * @param  hw Beginning address of the peripheral registers.
@@ -591,10 +680,30 @@ FORCE_INLINE_ATTR void uart_ll_set_dtr_active_level(uart_dev_t *hw, int level)
  *
  * @return None.
  */
-FORCE_INLINE_ATTR void uart_ll_set_wakeup_thrd(uart_dev_t *hw, uint32_t wakeup_thrd)
+FORCE_INLINE_ATTR void uart_ll_set_wakeup_edge_thrd(uart_dev_t *hw, uint32_t wakeup_thrd)
 {
-    hw->sleep_conf.active_threshold = wakeup_thrd - UART_LL_MIN_WAKEUP_THRESH;
+    // System would wakeup when the number of positive edges of RxD signal is larger than or equal to (UART_ACTIVE_THRESHOLD+3)
+    hw->sleep_conf.active_threshold = wakeup_thrd - UART_LL_WAKEUP_EDGE_THRED_MIN;
 }
+
+/**
+ * @brief  Mocking the selection of the UART wakeup mode, as it is not supported by this SOC.
+ */
+FORCE_INLINE_ATTR void uart_ll_set_wakeup_mode(uart_dev_t *hw, uart_wakeup_mode_t mode)
+{}
+
+/**
+ * @brief   Enable/disable the UART pad clock in sleep_state
+ *
+ * @param hw     Beginning address of the peripheral registers.
+ * @param enable enable or disable
+ */
+FORCE_INLINE_ATTR void _uart_ll_enable_pad_sleep_clock(uart_dev_t *hw, bool enable)
+{
+    (void)hw; (void)enable;
+}
+
+#define uart_ll_enable_pad_sleep_clock(...) (void)__DECLARE_RCC_ATOMIC_ENV; _uart_ll_enable_pad_sleep_clock(__VA_ARGS__)
 
 /**
  * @brief  Configure the UART work in normal mode.
@@ -722,8 +831,8 @@ FORCE_INLINE_ATTR void uart_ll_set_mode(uart_dev_t *hw, uart_mode_t mode)
  */
 FORCE_INLINE_ATTR void uart_ll_get_at_cmd_char(uart_dev_t *hw, uint8_t *cmd_char, uint8_t *char_num)
 {
-    *cmd_char = HAL_FORCE_READ_U32_REG_FIELD(hw->at_cmd_char, at_cmd_char);
-    *char_num = HAL_FORCE_READ_U32_REG_FIELD(hw->at_cmd_char, char_num);
+    *cmd_char = HAL_FORCE_READ_U32_REG_FIELD(hw->at_cmd_char, data);
+    *char_num = HAL_FORCE_READ_U32_REG_FIELD(hw->at_cmd_char, at_char_num);
 }
 
 /**
@@ -733,9 +842,9 @@ FORCE_INLINE_ATTR void uart_ll_get_at_cmd_char(uart_dev_t *hw, uint8_t *cmd_char
  *
  * @return The UART wakeup threshold value.
  */
-FORCE_INLINE_ATTR uint32_t uart_ll_get_wakeup_thrd(uart_dev_t *hw)
+FORCE_INLINE_ATTR uint32_t uart_ll_get_wakeup_edge_thrd(uart_dev_t *hw)
 {
-    return hw->sleep_conf.active_threshold + UART_LL_MIN_WAKEUP_THRESH;
+    return hw->sleep_conf.active_threshold + UART_LL_WAKEUP_EDGE_THRED_MIN;
 }
 
 /**
@@ -748,7 +857,7 @@ FORCE_INLINE_ATTR uint32_t uart_ll_get_wakeup_thrd(uart_dev_t *hw)
  */
 FORCE_INLINE_ATTR void uart_ll_get_data_bit_num(uart_dev_t *hw, uart_word_length_t *data_bit)
 {
-    *data_bit = hw->conf0.bit_num;
+    *data_bit = (uart_word_length_t)hw->conf0.bit_num;
 }
 
 /**
@@ -791,7 +900,7 @@ FORCE_INLINE_ATTR bool uart_ll_is_hw_cts_en(uart_dev_t *hw)
  * @brief Configure TX signal loop back to RX module, just for the testing purposes
  *
  * @param  hw Beginning address of the peripheral registers.
- * @param  loop_back_en Set ture to enable the loop back function, else set it false.
+ * @param  loop_back_en Set true to enable the loop back function, else set it false.
  *
  * @return None
  */
@@ -811,7 +920,8 @@ FORCE_INLINE_ATTR void uart_ll_set_loop_back(uart_dev_t *hw, bool loop_back_en)
  */
 FORCE_INLINE_ATTR void uart_ll_inverse_signal(uart_dev_t *hw, uint32_t inv_mask)
 {
-    uart_conf0_reg_t conf0_reg = hw->conf0;
+    uart_conf0_reg_t conf0_reg;
+    conf0_reg.val = hw->conf0.val;
     conf0_reg.irda_tx_inv = (inv_mask & UART_SIGNAL_IRDA_TX_INV) ? 1 : 0;
     conf0_reg.irda_rx_inv = (inv_mask & UART_SIGNAL_IRDA_RX_INV) ? 1 : 0;
     conf0_reg.rxd_inv = (inv_mask & UART_SIGNAL_RXD_INV) ? 1 : 0;
@@ -938,7 +1048,7 @@ FORCE_INLINE_ATTR uint32_t uart_ll_get_low_pulse_cnt(uart_dev_t *hw)
  *
  * @return None.
  */
-static inline void uart_ll_force_xoff(uart_port_t uart_num)
+FORCE_INLINE_ATTR void uart_ll_force_xoff(uart_port_t uart_num)
 {
     REG_CLR_BIT(UART_FLOW_CONF_REG(uart_num), UART_FORCE_XON);
     REG_SET_BIT(UART_FLOW_CONF_REG(uart_num), UART_SW_FLOW_CON_EN | UART_FORCE_XOFF);
@@ -965,9 +1075,21 @@ FORCE_INLINE_ATTR void uart_ll_force_xon(uart_port_t uart_num)
  *
  * @return UART module FSM status.
  */
-FORCE_INLINE_ATTR uint32_t uart_ll_get_fsm_status(uart_port_t uart_num)
+FORCE_INLINE_ATTR uint32_t uart_ll_get_tx_fsm_status(uart_port_t uart_num)
 {
     return REG_GET_FIELD(UART_FSM_STATUS_REG(uart_num), UART_ST_UTX_OUT);
+}
+
+/**
+ * @brief  Configure UART whether to discard when receiving wrong data
+ *
+ * @param  hw Beginning address of the peripheral registers.
+ * @param  discard true: Receiver stops storing data into FIFO when data is wrong
+ *                false: Receiver continue storing data into FIFO when data is wrong
+ */
+FORCE_INLINE_ATTR void uart_ll_discard_error_data(uart_dev_t *hw, bool discard)
+{
+    hw->conf0.err_wr_mask = discard ? 1 : 0;
 }
 
 #ifdef __cplusplus

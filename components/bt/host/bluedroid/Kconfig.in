@@ -26,249 +26,10 @@ config BT_BLUEDROID_PINNED_TO_CORE
     default 1 if BT_BLUEDROID_PINNED_TO_CORE_1
     default 0
 
-config BT_BLE_CONTROLLER_ENABLED
-    bool "Enable BLE controller"
-    depends on SOC_ESP_NIMBLE_CONTROLLER
-    default y
-    help
-            Enable or Disable NimBLE controller
-
-choice BT_BLE_SELECT_HCI_INTERFACE
-    prompt "Select HCI interface"
-    depends on SOC_ESP_NIMBLE_CONTROLLER
-    default BT_BLE_CONTROL_USE_RAM_HCI
-
-    config BT_BLE_CONTROL_USE_RAM_HCI
-        bool "ram"
-        help
-                Use RAM as HCI interface
-    config BT_BLE_CONTROL_USE_UART_HCI
-        bool "uart"
-        help
-                Use UART as HCI interface
-endchoice
-
-config BT_BLE_HCI_EVT_BUF_SIZE
-    int "HCI Event Buffer size"
-    depends on BT_BLUEDROID_ENABLED && SOC_ESP_NIMBLE_CONTROLLER
-    default 257 if BT_BLE_EXT_ADV
-    default 70
-    help
-        This is the size of each HCI event buffer in bytes. In case of
-        extended advertising, packets can be fragmented. 257 bytes is the
-        maximum size of a packet.
-
-menuconfig BT_BLE_MEMORY_SETTINGS
-    bool "OS Memory Settings"
-    depends on SOC_ESP_NIMBLE_CONTROLLER
-    default y
-    help
-            Settings memory blocks
-
-config BT_BLE_MSYS_1_BLOCK_COUNT
-    int "MSYS_1 Block Count"
-    depends on BT_BLE_MEMORY_SETTINGS
-    default 12
-    help
-        MSYS is a system level mbuf registry. For prepare write & prepare
-        responses MBUFs are allocated out of msys_1 pool. For NIMBLE_MESH
-        enabled cases, this block count is increased by 8 than user defined
-        count.
-
-config BT_BLE_MSYS_1_BLOCK_SIZE
-    int    "MSYS_1 Block Size"
-    depends on BT_BLE_MEMORY_SETTINGS
-    default 256
-    help
-            Dynamic memory size of block 1
-
-config BT_BLE_MSYS_2_BLOCK_COUNT
-    int    "MSYS_2 Block Count"
-    depends on BT_BLE_MEMORY_SETTINGS
-    default 24
-    help
-            Dynamic memory count
-
-config BT_BLE_MSYS_2_BLOCK_SIZE
-    int    "MSYS_2 Block Size"
-    depends on BT_BLE_MEMORY_SETTINGS
-    default 320
-    help
-            Dynamic memory size of block 2
-
-config BT_BLE_LL_RESOLV_LIST_SIZE
-    int "BLE LL Resolving list size"
-    range 1 5
-    default 5
-    depends on SOC_ESP_NIMBLE_CONTROLLER
-    help
-            Configure the size of resolving list used in link layer.
-
-
-config BT_BLE_HCI_EVT_HI_BUF_COUNT
-    int "High Priority HCI Event Buffer count"
-    depends on BT_BLUEDROID_ENABLED && SOC_ESP_NIMBLE_CONTROLLER
-    default 30
-    help
-        This is the high priority HCI events' buffer size. High-priority
-        event buffers are for everything except advertising reports. If there
-        are no free high-priority event buffers then host will try to allocate a
-        low-priority buffer instead
-
-config BT_BLE_HCI_EVT_LO_BUF_COUNT
-    int "Low Priority HCI Event Buffer count"
-    depends on BT_BLUEDROID_ENABLED && SOC_ESP_NIMBLE_CONTROLLER
-    default 8
-    help
-        This is the low priority HCI events' buffer size. Low-priority event
-        buffers are only used for advertising reports. If there are no free
-        low-priority event buffers, then an incoming advertising report will
-        get dropped
-
-config BT_BLE_LL_DUP_SCAN_LIST_COUNT
-    int "BLE duplicate scan list count"
-    range 1 20
-    default 10
-    depends on SOC_ESP_NIMBLE_CONTROLLER
-    help
-            config the max count of duplicate scan list
-
-config BT_BLE_MAX_CONNECTIONS
-    int "Maximum number of concurrent connections"
-    range 1 2 if ( SOC_ESP_NIMBLE_CONTROLLER)
-    default 2
-    depends on BT_BLUEDROID_ENABLED && SOC_ESP_NIMBLE_CONTROLLER
-    help
-        Defines maximum number of concurrent BLE connections. For ESP32, user
-        is expected to configure BTDM_CTRL_BLE_MAX_CONN from controller menu
-        along with this option. Similarly for ESP32-C3 or ESP32-S3, user is expected to
-        configure BT_CTRL_BLE_MAX_ACT from controller menu.
-
-config BT_BLE_ACL_BUF_COUNT
-    int "ACL Buffer count"
-    depends on BT_BLUEDROID_ENABLED && SOC_ESP_NIMBLE_CONTROLLER
-    default 24
-    help
-        The number of ACL data buffers.
-
-config BT_BLE_ACL_BUF_SIZE
-    int "ACL Buffer size"
-    depends on BT_BLUEDROID_ENABLED && SOC_ESP_NIMBLE_CONTROLLER
-    default 251
-    help
-        This is the maximum size of the data portion of HCI ACL data packets.
-        It does not include the HCI data header (of 4 bytes)
-
-config BT_BLE_HCI_UART_PORT
-    int "HCI UART port"
-    depends on BT_BLE_USE_UART_HCI
-    default 1
-    help
-        Set the port number of HCI UART
-
-config BT_BLE_HCI_UART_BAUD
-    int "HCI uart baudrate"
-    depends on BT_BLE_USE_UART_HCI
-    default 921600
-    help
-            HCI uart baud rate 115200 ~ 1000000
-
-config BT_BLE_SLEEP_ENABLE
-    bool "Enable BLE sleep"
-    depends on BT_BLUEDROID_ENABLED && SOC_ESP_NIMBLE_CONTROLLER
-    default n
-    help
-            Enable BLE sleep
-
-
-choice BT_BLE_COEX_PHY_CODED_TX_RX_TLIM
-    prompt "Coexistence: limit on MAX Tx/Rx time for coded-PHY connection"
-    default BT_BLE_COEX_PHY_CODED_TX_RX_TLIM_DIS
-    depends on ESP32_WIFI_SW_COEXIST_ENABLE && (BT_BLUEDROID_ENABLED && SOC_ESP_NIMBLE_CONTROLLER)
-    help
-            When using PHY-Coded in BLE connection, limitation on max tx/rx time can be applied to
-            better avoid dramatic performance deterioration of Wi-Fi.
-
-        config BT_BLE_COEX_PHY_CODED_TX_RX_TLIM_EN
-            bool "Force Enable"
-            help
-                Always enable the limitation on max tx/rx time for Coded-PHY connection
-
-        config BT_BLE_COEX_PHY_CODED_TX_RX_TLIM_DIS
-            bool "Force Disable"
-            help
-                Disable the limitation on max tx/rx time for Coded-PHY connection
-endchoice
-
-config BT_BLE_COEX_PHY_CODED_TX_RX_TLIM_EFF
-    int
-    default 0 if !(ESP32_WIFI_SW_COEXIST_ENABLE && (BT_BLUEDROID_ENABLED || BT_NIMBLE_ENABLED))
-    default 1 if BT_BLE_COEX_PHY_CODED_TX_RX_TLIM_EN
-    default 0 if BT_BLE_COEX_PHY_CODED_TX_RX_TLIM_DIS
-
-config BT_BLE_MAX_BONDS
-    int "Maximum number of bonds to save across reboots"
-    default 3
-    depends on BT_BLUEDROID_ENABLED && SOC_ESP_NIMBLE_CONTROLLER
-    help
-        Defines maximum number of bonds to save for peer security and our security
-
-
-config BT_BLE_WHITELIST_SIZE
-    int "BLE white list size"
-    depends on BT_BLUEDROID_ENABLED && SOC_ESP_NIMBLE_CONTROLLER
-    range 1 5
-    default 5
-    help
-            BLE list size
-
-config BT_BLE_CONTROLLER_TASK_STACK_SIZE
-    int "NimBLE Controller task stack size"
-    depends on (BT_BLUEDROID_ENABLED) && SOC_ESP_NIMBLE_CONTROLLER
-    default 5120 if BLE_MESH
-    default 4096
-    help
-            This configures stack size of NimBLE controller task
-
-choice BT_BLE_MEM_ALLOC_MODE
-    prompt "Memory allocation strategy"
-    default BT_BLE_MEM_ALLOC_MODE_INTERNAL
-    depends on SOC_ESP_NIMBLE_CONTROLLER
-    help
-        Allocation strategy for NimBLE host stack, essentially provides ability to
-        allocate all required dynamic allocations from,
-
-        - Internal DRAM memory only
-        - External SPIRAM memory only
-        - Either internal or external memory based on default malloc()
-          behavior in ESP-IDF
-        - Internal IRAM memory wherever applicable else internal DRAM
-
-    config BT_BLE_MEM_ALLOC_MODE_INTERNAL
-        bool "Internal memory"
-
-    config BT_BLE_MEM_ALLOC_MODE_EXTERNAL
-        bool "External SPIRAM"
-        depends on SPIRAM_USE_CAPS_ALLOC || SPIRAM_USE_MALLOC
-
-    config BT_BLE_MEM_ALLOC_MODE_DEFAULT
-        bool "Default alloc mode"
-
-    config BT_BLE_MEM_ALLOC_MODE_IRAM_8BIT
-        bool "Internal IRAM"
-        depends on ESP32_IRAM_AS_8BIT_ACCESSIBLE_MEMORY
-        help
-            Allows to use IRAM memory region as 8bit accessible region.
-
-            Every unaligned (8bit or 16bit) access will result in an exception
-            and incur penalty of certain clock cycles per unaligned read/write.
-
-endchoice #BT_BLE_MEM_ALLOC_MODE
-
 config BT_BTU_TASK_STACK_SIZE
     int "Bluetooth Bluedroid Host Stack task stack size"
     depends on BT_BLUEDROID_ENABLED
-    default 4096
+    default 4352
     help
         This select btu task stack size
 
@@ -279,19 +40,74 @@ config BT_BLUEDROID_MEM_DEBUG
     help
         Bluedroid memory debug
 
+config BT_BLUEDROID_ESP_COEX_VSC
+    bool "Enable Espressif Vendor-specific HCI commands for coexist status configuration"
+    depends on BT_BLUEDROID_ENABLED
+    default y if (ESP_COEX_SW_COEXIST_ENABLE || BT_CONTROLLER_DISABLED)
+    default n
+    help
+        Enable Espressif Vendor-specific HCI commands for coexist status configuration
+
 config BT_CLASSIC_ENABLED
     bool "Classic Bluetooth"
-    depends on BT_BLUEDROID_ENABLED && IDF_TARGET_ESP32
+    depends on BT_BLUEDROID_ENABLED && ((BT_CONTROLLER_ENABLED && SOC_BT_CLASSIC_SUPPORTED) || BT_CONTROLLER_DISABLED)
     default n
     help
         For now this option needs "SMP_ENABLE" to be set to yes
+
+choice BT_ENC_KEY_SIZE_CTRL_ENABLED
+    prompt "configure encryption key size"
+    depends on BT_CLASSIC_ENABLED
+    default BT_ENC_KEY_SIZE_CTRL_VSC
+    help
+        This chooses the support status of configuring encryption key size
+
+    config BT_ENC_KEY_SIZE_CTRL_STD
+        depends on (BT_CONTROLLER_DISABLED || (BT_CONTROLLER_ENABLED && SOC_BT_H2C_ENC_KEY_CTRL_ENH_STD_SUPPORTED))
+        bool "Supported by standard HCI command"
+
+    config BT_ENC_KEY_SIZE_CTRL_VSC
+        depends on (BT_CONTROLLER_DISABLED || (BT_CONTROLLER_ENABLED && SOC_BT_H2C_ENC_KEY_CTRL_ENH_VSC_SUPPORTED))
+        bool "Supported by Vendor-specific HCI command"
+
+    config BT_ENC_KEY_SIZE_CTRL_NONE
+        bool "Not supported"
+endchoice
+
+config BT_CLASSIC_BQB_ENABLED
+    bool "Host Qualitifcation support for Classic Bluetooth"
+    depends on BT_CLASSIC_ENABLED
+    default n
+    help
+        This enables functionalities of Host qualification for Classic Bluetooth.
 
 config BT_A2DP_ENABLE
     bool "A2DP"
     depends on BT_CLASSIC_ENABLED
     default n
+    select BT_AVRCP_ENABLED
     help
-        Advanced Audio Distrubution Profile
+        Advanced Audio Distribution Profile
+
+config BT_AVRCP_ENABLED
+    bool
+    depends on BT_A2DP_ENABLE
+    default y
+    help
+        Audio/Video Remote Control Profile, AVRCP and A2DP are coupled in Bluedroid,
+        AVRCP still controlled by A2DP option, this is a dummy option currently
+
+menu "AVRCP Features"
+    depends on BT_AVRCP_ENABLED
+
+    config BT_AVRCP_CT_COVER_ART_ENABLED
+        bool "AVRCP CT Cover Art"
+        default y
+        select BT_GOEPC_ENABLED
+        help
+            This enable Cover Art feature of AVRCP CT role
+
+endmenu
 
 config BT_SPP_ENABLED
     bool "SPP"
@@ -308,21 +124,31 @@ config BT_L2CAP_ENABLED
         This enables the Logical Link Control and Adaptation Layer Protocol.
         Only supported classic bluetooth.
 
-config BT_HFP_ENABLE
+config BT_SDP_COMMON_ENABLED
+    bool "BT SDP COMMON"
+    depends on BT_CLASSIC_ENABLED
+    default y if BT_L2CAP_ENABLED
+    default n
+    help
+        This enables common SDP operation, such as SDP record creation and deletion.
+
+menuconfig BT_HFP_ENABLE
     bool "Hands Free/Handset Profile"
     depends on BT_CLASSIC_ENABLED
     default n
+    help
+        Hands Free Unit and Audio Gateway can be included simultaneously
+        but they cannot run simultaneously due to internal limitations.
 
-choice BT_HFP_ROLE
-    prompt "Hands-free Profile Role configuration"
+config BT_HFP_CLIENT_ENABLE
+    bool "Hands Free Unit"
     depends on BT_HFP_ENABLE
+    default y
 
-    config BT_HFP_CLIENT_ENABLE
-        bool "Hands Free Unit"
-
-    config BT_HFP_AG_ENABLE
-        bool "Audio Gateway"
-endchoice
+config BT_HFP_AG_ENABLE
+    bool "Audio Gateway"
+    depends on BT_HFP_ENABLE
+    default y
 
 choice BT_HFP_AUDIO_DATA_PATH
     prompt "audio(SCO) data path"
@@ -340,40 +166,61 @@ endchoice
 
 config BT_HFP_WBS_ENABLE
     bool "Wide Band Speech"
-    depends on BT_HFP_AUDIO_DATA_PATH_HCI
+    depends on BT_HFP_ENABLE && BT_HFP_AUDIO_DATA_PATH_HCI
     default y
     help
         This enables Wide Band Speech. Should disable it when SCO data path is PCM.
-        Otherwise there will be no data transmited via GPIOs.
+        Otherwise there will be no data transmitted via GPIOs.
 
-config BT_HID_ENABLED
+menuconfig BT_HID_ENABLED
     bool "Classic BT HID"
     depends on BT_CLASSIC_ENABLED
     default n
     help
+        This enables the BT HID functionalities
+
+config BT_HID_HOST_ENABLED
+    bool "Classic BT HID Host"
+    depends on BT_HID_ENABLED
+    default n
+    help
         This enables the BT HID Host
 
-choice BT_HID_ROLE
-    prompt "Profile Role configuration"
+config BT_HID_DEVICE_ENABLED
+    bool "Classic BT HID Device"
     depends on BT_HID_ENABLED
-    config BT_HID_HOST_ENABLED
-        bool "Classic BT HID Host"
-        help
-            This enables the BT HID Host
-
-    config BT_HID_DEVICE_ENABLED
-        bool "Classic BT HID Device"
-        help
-            This enables the BT HID Device
-endchoice
-
-config BT_SSP_ENABLED
-    bool "Secure Simple Pairing"
-    depends on BT_CLASSIC_ENABLED
-    default y
     help
-        This enables the Secure Simple Pairing. If disable this option,
-        Bluedroid will only support Legacy Pairing
+        This enables the BT HID Device
+
+menuconfig BT_PBAC_ENABLED
+    bool "PBAP Client"
+    depends on BT_CLASSIC_ENABLED
+    default n
+    select BT_GOEPC_ENABLED
+    help
+        This enables the Phone Book Access Profile Client
+
+config BT_PBAC_SUPPORTED_FEAT
+    hex "PBAP Client Supported Features"
+    depends on BT_PBAC_ENABLED
+    default 0x000003FF
+    help
+        Set the supported features of PBAP Client, the default value is supported all features
+
+config BT_PBAC_PREFERRED_MTU
+    int "PBAP Client Preferred MTU"
+    depends on BT_PBAC_ENABLED
+    default 0
+    help
+        MTU is limited by the max MTU of transport layer, and should not be smaller than 255,
+        but can be set to zero to use a default MTU of transport layer
+
+config BT_GOEPC_ENABLED
+    bool
+    depends on BT_CLASSIC_ENABLED
+    default n
+    help
+        This enables the BT GOEP Profile Client role
 
 config BT_BLE_ENABLED
     bool "Bluetooth Low Energy"
@@ -382,7 +229,7 @@ config BT_BLE_ENABLED
     help
         This enables Bluetooth Low Energy
 
-config BT_GATTS_ENABLE
+menuconfig BT_GATTS_ENABLE
     bool "Include GATT server module(GATTS)"
     depends on BT_BLE_ENABLED
     default y
@@ -394,8 +241,9 @@ config BT_GATTS_PPCP_CHAR_GAP
     depends on BT_GATTS_ENABLE
     default n
     help
-        This enables "Peripheral Preferred Connection Parameters" characteristic (UUID: 0x2A04) in GAP service that has
-        connection parameters like min/max connection interval, slave latency and supervision timeout multiplier
+        This enables "Peripheral Preferred Connection Parameters" characteristic (UUID: 0x2A04)
+        in GAP service that has connection parameters like min/max connection interval, slave
+        latency and supervision timeout multiplier
 
 config BT_BLE_BLUFI_ENABLE
     bool "Include blufi function"
@@ -412,6 +260,13 @@ config BT_GATT_MAX_SR_PROFILES
     help
         Maximum GATT Server Profiles Count
 
+config BT_GATT_MAX_SR_ATTRIBUTES
+    int "Max GATT Service Attributes"
+    depends on BT_GATTS_ENABLE && BT_BLUEDROID_ENABLED
+    range 1 500
+    default 100
+    help
+        Maximum GATT Service Attributes Count
 
 
 choice BT_GATTS_SEND_SERVICE_CHANGE_MODE
@@ -440,12 +295,52 @@ config BT_GATTS_SEND_SERVICE_CHANGE_MODE
     default 1 if BT_GATTS_SEND_SERVICE_CHANGE_MANUAL
     default 0
 
-config BT_GATTC_ENABLE
+config BT_GATTS_ROBUST_CACHING_ENABLED
+    bool "Enable Robust Caching on Server Side"
+    depends on BT_GATTS_ENABLE
+    default n
+    help
+        This option enables the GATT robust caching feature on the server.
+        if turned on, the Client Supported Features characteristic, Database Hash characteristic,
+        and Server Supported Features characteristic will be included in the GAP SERVICE.
+
+
+config BT_GATTS_DEVICE_NAME_WRITABLE
+    bool "Allow to write device name by GATT clients"
+    depends on BT_GATTS_ENABLE
+    default n
+    help
+        Enabling this option allows remote GATT clients to write device name
+
+config BT_GATTS_APPEARANCE_WRITABLE
+    bool "Allow to write appearance by GATT clients"
+    depends on BT_GATTS_ENABLE
+    default n
+    help
+        Enabling this option allows remote GATT clients to write appearance
+
+menuconfig BT_GATTC_ENABLE
     bool "Include GATT client module(GATTC)"
     depends on BT_BLE_ENABLED
     default y
     help
         This option can be close when the app work only on gatt server mode
+
+config BT_GATTC_MAX_CACHE_CHAR
+    int "Max gattc cache characteristic for discover"
+    depends on BT_GATTC_ENABLE
+    range 1 500
+    default 40
+    help
+        Maximum GATTC cache characteristic count
+
+config BT_GATTC_NOTIF_REG_MAX
+    int "Max gattc notify(indication) register number"
+    depends on BT_GATTC_ENABLE
+    range 1 64
+    default 5
+    help
+        Maximum GATTC notify(indication) register number
 
 config BT_GATTC_CACHE_NVS_FLASH
     bool "Save gattc cache data to nvs flash"
@@ -457,12 +352,21 @@ config BT_GATTC_CACHE_NVS_FLASH
 config BT_GATTC_CONNECT_RETRY_COUNT
     int "The number of attempts to reconnect if the connection establishment failed"
     depends on BT_GATTC_ENABLE
-    range 0 7
+    range 0 255
     default 3
     help
         The number of attempts to reconnect if the connection establishment failed
 
-config BT_BLE_SMP_ENABLE
+config BT_BLE_ESTAB_LINK_CONN_TOUT
+    int "Timeout of BLE connection establishment"
+    depends on BT_GATTC_ENABLE
+    range 1 60
+    default 30
+    help
+        Bluetooth Connection establishment maximum time, if connection time exceeds this value, the connection
+        establishment fails, ESP_GATTC_OPEN_EVT or ESP_GATTS_OPEN_EVT is triggered.
+
+menuconfig BT_BLE_SMP_ENABLE
     bool "Include BLE security module(SMP)"
     depends on BT_BLE_ENABLED
     default y
@@ -476,6 +380,41 @@ config BT_SMP_SLAVE_CON_PARAMS_UPD_ENABLE
     help
         In order to reduce the pairing time, slave actively initiates connection parameters
         update during pairing.
+
+config BT_BLE_SMP_ID_RESET_ENABLE
+    bool "Reset device identity when all bonding records are deleted"
+    depends on BT_BLE_SMP_ENABLE
+    default n
+    help
+        There are tracking risks associated with using a fixed or static IRK.
+        If enabled this option, Bluedroid will assign a new randomly-generated IRK
+        when all pairing and bonding records are deleted. This would decrease the ability
+        of a previously paired peer to be used to determine whether a device
+        with which it previously shared an IRK is within range.
+
+config BT_BLE_SMP_BOND_NVS_FLASH
+    bool "Save SMP bonding keys to nvs flash"
+    depends on BT_BLE_SMP_ENABLE
+    default y
+    help
+        This select can save SMP bonding keys to nvs flash
+
+config BT_BLE_RPA_SUPPORTED
+    bool "Update RPA to Controller"
+    depends on (BT_BLE_SMP_ENABLE && ((BT_CONTROLLER_ENABLED && !SOC_BLE_DEVICE_PRIVACY_SUPPORTED) || BT_CONTROLLER_DISABLED)) # NOERROR
+    default n if (BT_CONTROLLER_ENABLED && !SOC_BLE_DEVICE_PRIVACY_SUPPORTED)
+    default y if BT_CONTROLLER_DISABLED
+    help
+        This enables controller RPA list function.
+        For ESP32, ESP32 only support network privacy mode. If this option is enabled, ESP32 will only accept
+        advertising packets from peer devices that contain private address, HW will not receive the advertising
+        packets contain identity address after IRK changed. If this option is disabled, address resolution will
+        be performed in the host, so the functions that require controller to resolve address in the white list
+        cannot be used. This option is disabled by default on ESP32, please enable or disable this option according
+        to your own needs.
+
+        For other BLE chips, devices support network privacy mode and device privacy mode,
+        users can switch the two modes according to their own needs. So this option is enabled by default.
 
 config BT_STACK_NO_LOG
     bool "Disable BT debug logs (minimize bin size)"
@@ -1225,16 +1164,20 @@ menu "BT DEBUG LOG LEVEL"
 endmenu #BT DEBUG LOG LEVEL
 
 config BT_ACL_CONNECTIONS
-    int "BT/BLE MAX ACL CONNECTIONS(1~7)"
+    int "BT/BLE MAX ACL CONNECTIONS(1~9)"
     depends on BT_BLUEDROID_ENABLED
-    range 1 7
+    range 1 9
     default 4
     help
-        Maximum BT/BLE connection count
+        Maximum BT/BLE connection count. The ESP32-C3/S3 chip supports a maximum of 10 instances,
+        including ADV, SCAN and connections. The ESP32-C3/S3 chip can connect up to 9 devices if
+        ADV or SCAN uses only one. If ADV and SCAN are both used, The ESP32-C3/S3 chip is connected
+        to a maximum of 8 devices. Because Bluetooth cannot reclaim used instances once ADV or SCAN
+        is used.
 
 config BT_MULTI_CONNECTION_ENBALE
-    bool "Enable BLE multi-conections"
-    depends on BT_BLUEDROID_ENABLED
+    bool "Enable BLE multi-connections"
+    depends on BT_BLE_ENABLED
     default y
     help
         Enable this option if there are multiple connections
@@ -1253,23 +1196,22 @@ config BT_BLE_DYNAMIC_ENV_MEMORY
     help
         This select can make the allocation of memory will become more flexible
 
-config BT_BLE_HOST_QUEUE_CONG_CHECK
-    bool "BLE queue congestion check"
-    depends on BT_BLUEDROID_ENABLED
-    default n
-    help
-        When scanning and scan duplicate is not enabled, if there are a lot of adv packets around
-        or application layer handling adv packets is slow, it will cause the controller memory
-        to run out. if enabled, adv packets will be lost when host queue is congested.
-
 config BT_SMP_ENABLE
     bool
     depends on BT_BLUEDROID_ENABLED
     default BT_CLASSIC_ENABLED || BT_BLE_SMP_ENABLE
 
+config BT_SMP_MAX_BONDS
+    int "BT/BLE maximum bond device count"
+    depends on BT_SMP_ENABLE
+    range 1 32
+    default 15
+    help
+        The number of security records for peer devices.
+
 config BT_BLE_ACT_SCAN_REP_ADV_SCAN
     bool "Report adv data and scan response individually when BLE active scan"
-    depends on BT_BLUEDROID_ENABLED && (BTDM_CTRL_MODE_BTDM || BTDM_CTRL_MODE_BLE_ONLY)
+    depends on BT_BLUEDROID_ENABLED && BT_BLE_ENABLED
     default n
     help
         Originally, when doing BLE active scan, Bluedroid will not report adv to application layer
@@ -1277,15 +1219,6 @@ config BT_BLE_ACT_SCAN_REP_ADV_SCAN
         Bluedroid will report adv data or scan response to application layer immediately.
 
         # Memory reserved at start of DRAM for Bluetooth stack
-
-config BT_BLE_ESTAB_LINK_CONN_TOUT
-    int "Timeout of BLE connection establishment"
-    depends on BT_BLUEDROID_ENABLED
-    range 1 60
-    default 30
-    help
-        Bluetooth Connection establishment maximum time, if connection time exceeds this value, the connection
-        establishment fails, ESP_GATTC_OPEN_EVT or ESP_GATTS_OPEN_EVT is triggered.
 
 config BT_MAX_DEVICE_NAME_LEN
     int "length of bluetooth device name"
@@ -1297,33 +1230,121 @@ config BT_MAX_DEVICE_NAME_LEN
         the complete device name, then only the shortname will be displayed, the rest parts that can't fit in
         will be truncated.
 
-config BT_BLE_RPA_SUPPORTED
-    bool "Update RPA to Controller"
-    depends on BT_BLUEDROID_ENABLED
-    default y if (IDF_TARGET_ESP32C3 || IDF_TARGET_ESP32S3)
-    default n if IDF_TARGET_ESP32
+config BT_BLE_RPA_TIMEOUT
+    int "Timeout of resolvable private address"
+    depends on BT_BLE_ENABLED
+    range 1 3600
+    default 900
     help
-        This enables controller RPA list function.
-        For ESP32, ESP32 only support network privacy mode. If this option is enabled, ESP32 will only accept
-        advertising packets from peer devices that contain private address, HW will not receive the advertising
-        packets contain identity address after IRK changed. If this option is disabled, address resolution will
-        be performed in the host, so the functions that require controller to resolve address in the white list
-        cannot be used. This option is disabled by default on ESP32, please enable or disable this option according
-        to your own needs.
+        This set RPA timeout of Controller and Host.
+        Default is 900 s (15 minutes). Range is 1 s to 1 hour (3600 s).
 
-        For ESP32C3 and esp32s3, devices support network privacy mode and device privacy mode, users can switch the
-        two modes according to their own needs. So this option is enabled by default.
-
-config BT_BLE_50_FEATURES_SUPPORTED
-    bool "Enable BLE 5.0 features"
-    depends on (BT_BLUEDROID_ENABLED && (IDF_TARGET_ESP32C3 || IDF_TARGET_ESP32S3 || SOC_ESP_NIMBLE_CONTROLLER))
+menuconfig BT_BLE_50_FEATURES_SUPPORTED
+    bool "Enable BLE 5.0 features(please disable BLE 4.2 if enable BLE 5.0)"
+    depends on (BT_BLE_ENABLED && ((BT_CONTROLLER_ENABLED && SOC_BLE_50_SUPPORTED) || BT_CONTROLLER_DISABLED))
     default y
     help
-        This enables BLE 5.0 features, this option only support esp32c3/esp32s3 chip
+        Enabling this option activates BLE 5.0 features.
+        This option is universally supported in chips that support BLE, except for ESP32.
+        BLE 4.2 and BLE 5.0 cannot be used simultaneously.
 
-config BT_BLE_42_FEATURES_SUPPORTED
-    bool "Enable BLE 4.2 features"
-    depends on (BT_BLUEDROID_ENABLED && (IDF_TARGET_ESP32C3 || IDF_TARGET_ESP32S3))
+config BT_BLE_50_EXTEND_ADV_EN
+    bool "Enable BLE extend advertising"
+    depends on BT_BLE_50_FEATURES_SUPPORTED
+    default y
+    help
+        This enables BLE extend advertising
+
+config BT_BLE_50_PERIODIC_ADV_EN
+    bool "Enable BLE periodic advertising"
+    depends on BT_BLE_50_FEATURES_SUPPORTED
+    default y
+    help
+        This enables BLE periodic advertising
+
+config BT_BLE_50_EXTEND_SCAN_EN
+    bool "Enable BLE extend scan"
+    depends on BT_BLE_50_FEATURES_SUPPORTED
+    default y
+    help
+        This enables BLE extend scan
+
+config BT_BLE_50_EXTEND_SYNC_EN
+    bool "Enable BLE periodic advertising sync"
+    depends on BT_BLE_50_FEATURES_SUPPORTED
+    default y
+    help
+        This enables BLE periodic advertising sync
+
+config BT_BLE_50_DTM_TEST_EN
+    bool "Enable BLE 5.0 DTM test"
+    depends on BT_BLE_50_FEATURES_SUPPORTED
+    default y
+    help
+        This enables BLE 5.0 direct test mode
+
+config BT_BLE_FEAT_PERIODIC_ADV_SYNC_TRANSFER
+    bool "Enable BLE periodic advertising sync transfer feature"
+    depends on (BT_BLUEDROID_ENABLED && BT_BLE_50_FEATURES_SUPPORTED && ((BT_CONTROLLER_ENABLED && SOC_ESP_NIMBLE_CONTROLLER) || BT_CONTROLLER_DISABLED)) # NOERROR
+    default n
+    help
+        This enables BLE periodic advertising sync transfer feature
+
+config BT_BLE_FEAT_PERIODIC_ADV_ENH
+    bool "Enable periodic adv enhancements(adi support)"
+    depends on (BT_BLUEDROID_ENABLED && BT_BLE_50_FEATURES_SUPPORTED && ((BT_CONTROLLER_ENABLED && SOC_ESP_NIMBLE_CONTROLLER) || BT_CONTROLLER_DISABLED)) # NOERROR
+    default n
+    help
+        Enable the periodic advertising enhancements
+
+config BT_BLE_FEAT_CREATE_SYNC_ENH
+    bool "Enable create sync enhancements(reporting disable and duplicate filtering enable support)"
+    depends on (BT_BLUEDROID_ENABLED && BT_BLE_50_FEATURES_SUPPORTED && ((BT_CONTROLLER_ENABLED && SOC_ESP_NIMBLE_CONTROLLER) || BT_CONTROLLER_DISABLED)) # NOERROR
+    default n
+    help
+        Enable the create sync enhancements
+
+menuconfig BT_BLE_42_FEATURES_SUPPORTED
+    bool "Enable BLE 4.2 features(please disable BLE 5.0 if enable BLE 4.2)"
+    depends on BT_BLE_ENABLED
+    default y if IDF_TARGET_ESP32
     default n
     help
         This enables BLE 4.2 features.
+        This option is universally supported by all ESP chips with BLE capabilities.
+        BLE 4.2 and BLE 5.0 cannot be used simultaneously.
+
+config BT_BLE_42_DTM_TEST_EN
+    bool "Enable BLE 4.2 DTM test"
+    depends on BT_BLE_42_FEATURES_SUPPORTED
+    default y
+    help
+        This enables BLE 4.2 direct test mode
+
+config BT_BLE_42_ADV_EN
+    bool "Enable BLE 4.2 advertising"
+    depends on BT_BLE_42_FEATURES_SUPPORTED
+    default y
+    help
+        This enables BLE v4.2 advertising
+
+config BT_BLE_42_SCAN_EN
+    bool "Enable BLE 4.2 scan"
+    depends on BT_BLE_42_FEATURES_SUPPORTED
+    default y
+    help
+        This enables BLE v4.2 scan
+
+config BT_BLE_HIGH_DUTY_ADV_INTERVAL
+    bool "Enable BLE high duty advertising interval feature"
+    depends on BT_BLE_ENABLED
+    default n
+    help
+        This enable BLE high duty advertising interval feature
+
+config BT_ABORT_WHEN_ALLOCATION_FAILS
+    bool "Abort when memory allocation fails in BT/BLE stack"
+    depends on BT_BLUEDROID_ENABLED
+    default n
+    help
+        This enables abort when memory allocation fails

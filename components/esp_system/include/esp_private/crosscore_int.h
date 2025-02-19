@@ -23,7 +23,6 @@ extern "C" {
  */
 void esp_crosscore_int_init(void);
 
-
 /**
  * Send an interrupt to a CPU indicating it should yield its
  * currently running task in favour of a higher-priority task
@@ -35,7 +34,6 @@ void esp_crosscore_int_init(void);
  * @param core_id Core that should do the yielding
  */
 void esp_crosscore_int_send_yield(int core_id);
-
 
 /**
  * Send an interrupt to a CPU indicating it should update its
@@ -50,17 +48,32 @@ void esp_crosscore_int_send_freq_switch(int core_id);
 
 void esp_crosscore_int_send_gdb_call(int core_id);
 
-#if !CONFIG_IDF_TARGET_ESP32C3 && !CONFIG_IDF_TARGET_ESP32H2 && !CONFIG_IDF_TARGET_ESP32C2
+#if !CONFIG_ESP_SYSTEM_SINGLE_CORE_MODE
 /**
  * Send an interrupt to a CPU indicating it should print its current backtrace
  *
- * This is use internally by the Task Watchdog to dump the backtrace of the
+ * This is used internally by the Task Watchdog to dump the backtrace of the
  * opposite core and should not be called from application code.
  *
  * @param core_id Core that should print its backtrace
  */
 void esp_crosscore_int_send_print_backtrace(int core_id);
-#endif
+
+#if CONFIG_ESP_TASK_WDT_EN
+/**
+ * Send an interrupt to a CPU indicating it call `task_wdt_timeout_abort_xtensa`.
+ * This will make the CPU abort, using the interrupted task frame.
+ *
+ * This is used internally by the Task Watchdog when it should abort after a task,
+ * running on the other core than the one running the TWDT ISR, failed to reset
+ * its timer.
+ *
+ * @param core_id Core that should abort
+ */
+void esp_crosscore_int_send_twdt_abort(int core_id);
+
+#endif // CONFIG_ESP_TASK_WDT_EN
+#endif // !CONFIG_ESP_SYSTEM_SINGLE_CORE_MODE
 
 #ifdef __cplusplus
 }

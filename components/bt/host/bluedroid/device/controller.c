@@ -29,8 +29,9 @@
 #include "stack/btm_ble_api.h"
 #include "device/version.h"
 #include "osi/future.h"
+#include "config/stack_config.h"
 #if (BLE_50_FEATURE_SUPPORT == TRUE)
-const bt_event_mask_t BLE_EVENT_MASK = { "\x00\x00\x00\x00\x00\x0f\xff\xff" };
+const bt_event_mask_t BLE_EVENT_MASK = { "\x00\x00\x00\x00\x00\xff\xff\xff" };
 #else
 const bt_event_mask_t BLE_EVENT_MASK = { "\x00\x00\x00\x00\x00\x00\x06\x7f" };
 #endif
@@ -82,7 +83,9 @@ typedef struct {
     bool simple_pairing_supported;
     bool secure_connections_supported;
 #if (BLE_50_FEATURE_SUPPORT == TRUE)
+#if (BLE_50_EXTEND_ADV_EN == TRUE)
     uint16_t ble_ext_adv_data_max_len;
+#endif // #if (BLE_50_EXTEND_ADV_EN == TRUE)
 #endif //#if (BLE_50_FEATURE_SUPPORT == TRUE)
 } controller_local_param_t;
 
@@ -118,11 +121,13 @@ static void start_up(void)
     response = AWAIT_COMMAND(controller_param.packet_factory->make_set_c2h_flow_control(HCI_HOST_FLOW_CTRL_ACL_ON));
     controller_param.packet_parser->parse_generic_command_complete(response);
 #endif ///C2H_FLOW_CONTROL_INCLUDED == TRUE
+#if (BLE_42_SCAN_EN == TRUE)
 #if (BLE_ADV_REPORT_FLOW_CONTROL == TRUE)
     // Enable adv flow control
     response = AWAIT_COMMAND(controller_param.packet_factory->make_set_adv_report_flow_control(HCI_HOST_FLOW_CTRL_ADV_REPORT_ON, (uint16_t)BLE_ADV_REPORT_FLOW_CONTROL_NUM, (uint16_t)BLE_ADV_REPORT_DISCARD_THRSHOLD));
     controller_param.packet_parser->parse_generic_command_complete(response);
 #endif
+#endif // #if (BLE_42_SCAN_EN == TRUE)
     // Tell the controller about our buffer sizes and buffer counts next
     // TODO(zachoverflow): factor this out. eww l2cap contamination. And why just a hardcoded 10?
     response = AWAIT_COMMAND(
@@ -172,13 +177,10 @@ static void start_up(void)
     // Inform the controller what page 0 features we support, based on what
     // it told us it supports. We need to do this first before we request the
     // next page, because the controller's response for page 1 may be
-    // dependent on what we configure from page 0
-#if (BT_SSP_INCLUDED == TRUE)
-    controller_param.simple_pairing_supported = HCI_SIMPLE_PAIRING_SUPPORTED(controller_param.features_classic[0].as_array);
-#else
-    controller_param.simple_pairing_supported = false;
-#endif
-
+    // dependent on what we configure from page 0 and host SSP configuration
+    controller_param.simple_pairing_supported = HCI_SIMPLE_PAIRING_SUPPORTED(
+                                                    controller_param.features_classic[0].as_array) &&
+                                                (bluedriod_config_get()->get_ssp_enabled());
     if (controller_param.simple_pairing_supported) {
         response = AWAIT_COMMAND(controller_param.packet_factory->make_write_simple_pairing_mode(HCI_SP_MODE_ENABLED));
         controller_param.packet_parser->parse_generic_command_complete(response);
@@ -267,16 +269,20 @@ static void start_up(void)
                 &controller_param.ble_resolving_list_max_size);
         }
 #if BLE_50_FEATURE_SUPPORT == TRUE
+#if (BLE_50_EXTEND_ADV_EN == TRUE)
         controller_param.ble_ext_adv_data_max_len = BLE_EXT_ADV_DATA_LEN_MAX;
+#endif // #if (BLE_50_EXTEND_ADV_EN == TRUE)
 #endif //#if (BLE_50_FEATURE_SUPPORT == TRUE)
 
 #if (BLE_50_FEATURE_SUPPORT == TRUE && BLE_42_FEATURE_SUPPORT == FALSE)
-        if (HCI_LE_ENHANCED_PRIVACY_SUPPORTED(controller_param.features_ble.as_array)) {
+#if (BLE_50_EXTEND_ADV_EN == TRUE)
+        if (HCI_LE_EXT_ADV_SUPPORTED(controller_param.features_ble.as_array)) {
             response = AWAIT_COMMAND(controller_param.packet_factory->make_read_max_adv_data_len());
             controller_param.packet_parser->parse_ble_read_adv_max_len_response(
                 response,
                 &controller_param.ble_ext_adv_data_max_len);
         }
+#endif // #if (BLE_50_EXTEND_ADV_EN == TRUE)
 #endif // (BLE_50_FEATURE_SUPPORT == TRUE && BLE_42_FEATURE_SUPPORT == FALSE)
 
         if (HCI_LE_DATA_LEN_EXT_SUPPORTED(controller_param.features_ble.as_array)) {
@@ -510,6 +516,7 @@ static void set_ble_resolving_list_max_size(int resolving_list_max_size)
     controller_param.ble_resolving_list_max_size = resolving_list_max_size;
 }
 #if (BLE_50_FEATURE_SUPPORT == TRUE)
+#if (BLE_50_EXTEND_ADV_EN == TRUE)
 static uint16_t ble_get_ext_adv_data_max_len(void)
 {
     assert(controller_param.readable);
@@ -517,6 +524,7 @@ static uint16_t ble_get_ext_adv_data_max_len(void)
 
     return controller_param.ble_ext_adv_data_max_len;
 }
+#endif // #if (BLE_50_EXTEND_ADV_EN == TRUE)
 #endif // #if (BLE_50_FEATURE_SUPPORT == TRUE)
 #if (BTM_SCO_HCI_INCLUDED == TRUE)
 static uint8_t get_sco_data_size(void)
@@ -576,7 +584,9 @@ static const controller_t interface = {
     get_ble_resolving_list_max_size,
     set_ble_resolving_list_max_size,
 #if (BLE_50_FEATURE_SUPPORT == TRUE)
+#if (BLE_50_EXTEND_ADV_EN == TRUE)
     ble_get_ext_adv_data_max_len,
+#endif // #if (BLE_50_EXTEND_ADV_EN == TRUE)
 #endif // #if (BLE_50_FEATURE_SUPPORT == TRUE)
 #if (BTM_SCO_HCI_INCLUDED == TRUE)
     get_sco_data_size,

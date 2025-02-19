@@ -7,6 +7,7 @@
 #define __HWCRYPTO_REG_H__
 
 #include "soc.h"
+#include "soc/xts_aes_reg.h"
 
 #define SHA_MODE_SHA1       0
 #define SHA_MODE_SHA224     1

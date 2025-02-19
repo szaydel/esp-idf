@@ -495,11 +495,11 @@ void bta_gatts_add_char_descr(tBTA_GATTS_SRVC_CB *p_srvc_cb, tBTA_GATTS_DATA *p_
 
 /*******************************************************************************
 **
-** Function         bta_gatts_add_char_descr
+** Function         bta_gatts_set_attr_value
 **
-** Description      action function to add characteristic descriptor.
+** Description      This function is used to set the attribute value.
 **
-** Returns          none.
+** Returns          None.
 **
 *******************************************************************************/
 void bta_gatts_set_attr_value(tBTA_GATTS_SRVC_CB *p_srvc_cb, tBTA_GATTS_DATA *p_msg)
@@ -526,8 +526,23 @@ void bta_gatts_set_attr_value(tBTA_GATTS_SRVC_CB *p_srvc_cb, tBTA_GATTS_DATA *p_
     }
 }
 
+/*******************************************************************************
+**
+** Function         bta_gatts_get_attr_value
+**
+** Description      This function retrieves the attribute value associated with
+**                  the given attribute handle.
+**
+** Returns          tGATT_STATUS - GATT status indicating success or failure in
+**                  retrieving the attribute value.
+**
+*******************************************************************************/
+
 tGATT_STATUS bta_gatts_get_attr_value(UINT16 attr_handle, UINT16 *length, UINT8 **value)
 {
+    if (GATTS_GetAttributeValueInternal(attr_handle, length, value) == 0) {
+        return 0;
+    }
 
    return GATTS_GetAttributeValue(attr_handle, length, value);
 }
@@ -699,7 +714,7 @@ void bta_gatts_indicate_handle (tBTA_GATTS_CB *p_cb, tBTA_GATTS_DATA *p_msg)
             cb_data.req_data.data_len = 0;
             cb_data.req_data.handle = p_msg->api_indicate.attr_id;
 
-            if (p_msg->api_indicate.value && (p_msg->api_indicate.len > 0)) {
+            if (p_msg->api_indicate.len > 0) {
                 cb_data.req_data.value = (uint8_t *) osi_malloc(p_msg->api_indicate.len);
                 if (cb_data.req_data.value != NULL) {
                     memset(cb_data.req_data.value, 0, p_msg->api_indicate.len);
@@ -707,10 +722,6 @@ void bta_gatts_indicate_handle (tBTA_GATTS_CB *p_cb, tBTA_GATTS_DATA *p_msg)
                     memcpy(cb_data.req_data.value, p_msg->api_indicate.value, p_msg->api_indicate.len);
                 } else {
                     APPL_TRACE_ERROR("%s, malloc failed", __func__);
-                }
-            } else {
-                if (p_msg->api_indicate.value) {
-                    APPL_TRACE_ERROR("%s, incorrect length", __func__);
                 }
             }
             (*p_rcb->p_cback)(BTA_GATTS_CONF_EVT, &cb_data);
@@ -720,7 +731,7 @@ void bta_gatts_indicate_handle (tBTA_GATTS_CB *p_cb, tBTA_GATTS_DATA *p_msg)
             }
         }
     } else {
-        APPL_TRACE_ERROR("Not an registered servce attribute ID: 0x%04x",
+        APPL_TRACE_ERROR("Not a registered service attribute ID: 0x%04x",
                          p_msg->api_indicate.attr_id);
     }
 }
@@ -873,36 +884,17 @@ void bta_gatts_send_service_change_indication (tBTA_GATTS_DATA *p_msg)
 
 /*******************************************************************************
 **
-** Function         bta_gatts_listen
+** Function         bta_gatts_show_local_database
 **
-** Description      Start or stop listening for LE connection on a GATT server
+** Description      print local service database
 **
 ** Returns          none.
 **
 *******************************************************************************/
-void bta_gatts_listen(tBTA_GATTS_CB *p_cb, tBTA_GATTS_DATA *p_msg)
+void bta_gatts_show_local_database (void)
 {
-    tBTA_GATTS_RCB     *p_rcb = bta_gatts_find_app_rcb_by_app_if(p_msg->api_listen.server_if);
-    tBTA_GATTS          cb_data;
-    UNUSED(p_cb);
-
-    cb_data.reg_oper.status = BTA_GATT_OK;
-    cb_data.reg_oper.server_if = p_msg->api_listen.server_if;
-
-    if (p_rcb == NULL) {
-        APPL_TRACE_ERROR("Unknown GATTS application");
-        return;
-    }
-
-    if (!GATT_Listen(p_msg->api_listen.server_if,
-                     p_msg->api_listen.start,
-                     p_msg->api_listen.remote_bda)) {
-        cb_data.status = BTA_GATT_ERROR;
-        APPL_TRACE_ERROR("bta_gatts_listen Listen failed");
-    }
-
-    if (p_rcb->p_cback) {
-        (*p_rcb->p_cback)(BTA_GATTS_LISTEN_EVT, &cb_data);
+    if (GATTS_ShowLocalDatabase()) {
+        APPL_TRACE_ERROR("%s failed", __func__);
     }
 }
 
@@ -1003,6 +995,10 @@ static void bta_gatts_conn_cback (tGATT_IF gatt_if, BD_ADDR bda, UINT16 conn_id,
                 cb_data.conn.conn_params.latency = p_lcb->current_used_conn_latency;
                 cb_data.conn.conn_params.timeout = p_lcb->current_used_conn_timeout;
                 cb_data.conn.link_role = p_lcb->link_role;
+                #if (BLE_INCLUDED == TRUE)
+                cb_data.conn.ble_addr_type = p_lcb->ble_addr_type;
+                #endif
+                cb_data.conn.conn_handle = p_lcb->handle;
             }else {
                 APPL_TRACE_WARNING("%s not found connection parameters of the device ", __func__);
             }

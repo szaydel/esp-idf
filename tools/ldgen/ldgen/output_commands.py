@@ -1,8 +1,7 @@
 #
-# SPDX-FileCopyrightText: 2021-2022 Espressif Systems (Shanghai) CO LTD
+# SPDX-FileCopyrightText: 2021-2024 Espressif Systems (Shanghai) CO LTD
 # SPDX-License-Identifier: Apache-2.0
 #
-
 from .entity import Entity
 
 # Contains classes for output section commands referred to in
@@ -20,8 +19,9 @@ class AlignAtAddress:
     command to be emitted.
     """
 
-    def __init__(self, alignment):
+    def __init__(self, alignment, tied=False):
         self.alignment = alignment
+        self.tied = tied
 
     def __str__(self):
         return ('. = ALIGN(%d);' % self.alignment)
@@ -43,8 +43,9 @@ class SymbolAtAddress:
     an InputSectionDesc.
     """
 
-    def __init__(self, symbol):
+    def __init__(self, symbol, tied=False):
         self.symbol = symbol
+        self.tied = tied
 
     def __str__(self):
         return ('%s = ABSOLUTE(.);' % self.symbol)
@@ -59,13 +60,13 @@ class InputSectionDesc:
     Outputs an input section description as described in
     https://www.acrc.bris.ac.uk/acrc/RedHat/rhel-ld-en-4/sections.html#INPUT-SECTION.
 
-    These commands are emmited from mapping fragment entries, specifically attaching
+    These commands are emitted from mapping fragment entries, specifically attaching
     a scheme onto an entity. Mapping fragment flags KEEP, SORT will also affect
     the emitted input section description.
     """
 
-    def __init__(self, entity, sections, exclusions=None, keep=False, sort=None):
-        assert (entity.specificity != Entity.Specificity.SYMBOL)
+    def __init__(self, entity, sections, exclusions=None, keep=False, sort=None, tied=False):
+        assert entity.specificity != Entity.Specificity.SYMBOL
 
         self.entity = entity
         self.sections = set(sections)
@@ -73,19 +74,21 @@ class InputSectionDesc:
         self.exclusions = set()
 
         if exclusions:
-            assert (not [e for e in exclusions if e.specificity == Entity.Specificity.SYMBOL or
-                         e.specificity == Entity.Specificity.NONE])
+            assert not [e for e in exclusions if e.specificity == Entity.Specificity.SYMBOL or
+                        e.specificity == Entity.Specificity.NONE]
             self.exclusions = set(exclusions)
         else:
             self.exclusions = set()
 
         self.keep = keep
         self.sort = sort
+        self.tied = tied
 
     def __str__(self):
-        sections_string = '( )'
+        sections_string = ''
 
         if self.sections:
+            sections_string = '( )'
             exclusion_strings = []
 
             for exc in sorted(self.exclusions):

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2021-2022 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2021-2024 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -13,8 +13,10 @@
 #include "soc/adc_periph.h"
 #include "soc/rtc_io_struct.h"
 #include "soc/sens_struct.h"
+#include "soc/sens_reg.h"
 #include "soc/syscon_struct.h"
 #include "soc/rtc_cntl_struct.h"
+#include "soc/clk_tree_defs.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -23,16 +25,31 @@ extern "C" {
 #define ADC_LL_EVENT_ADC1_ONESHOT_DONE    (1 << 0)
 #define ADC_LL_EVENT_ADC2_ONESHOT_DONE    (1 << 1)
 
-typedef enum {
-    ADC_POWER_BY_FSM,   /*!< ADC XPD controlled by FSM. Used for polling mode */
-    ADC_POWER_SW_ON,    /*!< ADC XPD controlled by SW. power on. Used for DMA mode */
-    ADC_POWER_SW_OFF,   /*!< ADC XPD controlled by SW. power off. */
-    ADC_POWER_MAX,      /*!< For parameter check. */
-} adc_ll_power_t;
+/*---------------------------------------------------------------
+                    Oneshot
+---------------------------------------------------------------*/
+#define ADC_LL_DATA_INVERT_DEFAULT(PERIPH_NUM)         (1)
+#define ADC_LL_SAR_CLK_DIV_DEFAULT(PERIPH_NUM)         (1)
+#define ADC_LL_DELAY_CYCLE_AFTER_DONE_SIGNAL           (0)
 
-typedef enum {
-    ADC_RTC_DATA_OK = 0,
-} adc_ll_rtc_raw_data_t;
+/*---------------------------------------------------------------
+                    DMA
+---------------------------------------------------------------*/
+#define ADC_LL_DIGI_DATA_INVERT_DEFAULT(PERIPH_NUM)    (1)
+#define ADC_LL_FSM_RSTB_WAIT_DEFAULT                   (8)
+#define ADC_LL_FSM_START_WAIT_DEFAULT                  (ADC_LL_DIGI_SAR_CLK_DIV_DEFAULT)
+#define ADC_LL_FSM_STANDBY_WAIT_DEFAULT                (100)
+#define ADC_LL_SAMPLE_CYCLE_DEFAULT                    (2)
+#define ADC_LL_DIGI_SAR_CLK_DIV_DEFAULT                (16)
+
+//On esp32, ADC can only be continuously triggered when `ADC_LL_DEFAULT_CONV_LIMIT_EN == 1`, `ADC_LL_DEFAULT_CONV_LIMIT_NUM != 0`
+#define ADC_LL_DEFAULT_CONV_LIMIT_EN      1
+#define ADC_LL_DEFAULT_CONV_LIMIT_NUM     10
+
+/*---------------------------------------------------------------
+                    PWDET (Power Detect)
+---------------------------------------------------------------*/
+#define ADC_LL_PWDET_CCT_DEFAULT                       (4)
 
 typedef enum {
     ADC_LL_CTRL_RTC   = 0,    ///< For ADC1 and ADC2. Select RTC controller.
@@ -131,19 +148,13 @@ static inline void adc_ll_digi_set_convert_limit_num(uint32_t meas_num)
 /**
  * Enable max conversion number detection for digital controller.
  * If the number of ADC conversion is equal to the maximum, the conversion is stopped.
+ * @note On esp32, this should always be 1 to trigger the ADC continuously
+ *
+ * @param enable  true: enable; false: disable
  */
-static inline void adc_ll_digi_convert_limit_enable(void)
+static inline void adc_ll_digi_convert_limit_enable(bool enable)
 {
-    SYSCON.saradc_ctrl2.meas_num_limit = 1;
-}
-
-/**
- * Disable max conversion number detection for digital controller.
- * If the number of ADC conversion is equal to the maximum, the conversion is stopped.
- */
-static inline void adc_ll_digi_convert_limit_disable(void)
-{
-    SYSCON.saradc_ctrl2.meas_num_limit = 0;
+    SYSCON.saradc_ctrl2.meas_num_limit = enable;
 }
 
 /**
@@ -218,7 +229,7 @@ static inline void adc_ll_digi_set_pattern_table_len(adc_unit_t adc_n, uint32_t 
 }
 
 /**
- * Set pattern table lenth for digital controller.
+ * Set pattern table length for digital controller.
  * The pattern table that defines the conversion rules for each SAR ADC. Each table has 16 items, in which channel selection,
  * resolution and attenuation are stored. When the conversion is started, the controller reads conversion rules from the
  * pattern table one by one. For each controller the scan sequence has at most 16 different rules before repeating itself.
@@ -339,7 +350,7 @@ static inline void adc_ll_set_sar_clk_div(adc_unit_t adc_n, uint32_t div)
  * Set adc output data format for RTC controller.
  *
  * @param adc_n ADC unit.
- * @param bits Output data bits width option, see ``adc_bits_width_t``.
+ * @param bits Output data bits width option
  */
 static inline void adc_oneshot_ll_set_output_bits(adc_unit_t adc_n, adc_bitwidth_t bits)
 {
@@ -355,6 +366,9 @@ static inline void adc_oneshot_ll_set_output_bits(adc_unit_t adc_n, adc_bitwidth
             reg_val = 2;
             break;
         case ADC_BITWIDTH_12:
+            reg_val = 3;
+            break;
+        case ADC_BITWIDTH_DEFAULT:
             reg_val = 3;
             break;
         default:
@@ -518,6 +532,7 @@ static inline void adc_oneshot_ll_set_atten(adc_unit_t adc_n, adc_channel_t chan
  * @param channel ADCn channel number.
  * @return atten The attenuation option.
  */
+__attribute__((always_inline))
 static inline adc_atten_t adc_ll_get_atten(adc_unit_t adc_n, adc_channel_t channel)
 {
     if (adc_n == ADC_UNIT_1) {
@@ -549,22 +564,23 @@ static inline void adc_oneshot_ll_disable_all_unit(void)
 /*---------------------------------------------------------------
                     Common setting
 ---------------------------------------------------------------*/
+
 /**
- * Set ADC module power management.
- *
- * @param manage Set ADC power status.
+ * @brief Enable the ADC clock
+ * @param enable true to enable, false to disable
  */
-static inline void adc_ll_set_power_manage(adc_ll_power_t manage)
+static inline void adc_ll_enable_bus_clock(bool enable)
 {
-    /* Bit1  0:Fsm  1: SW mode
-       Bit0  0:SW mode power down  1: SW mode power on */
-    if (manage == ADC_POWER_SW_ON) {
-        SENS.sar_meas_wait2.force_xpd_sar = SENS_FORCE_XPD_SAR_PU;
-    } else if (manage == ADC_POWER_BY_FSM) {
-        SENS.sar_meas_wait2.force_xpd_sar = SENS_FORCE_XPD_SAR_FSM;
-    } else if (manage == ADC_POWER_SW_OFF) {
-        SENS.sar_meas_wait2.force_xpd_sar = SENS_FORCE_XPD_SAR_PD;
-    }
+    (void)enable;
+    //For compatibility
+}
+
+/**
+ * @brief Reset ADC module
+ */
+static inline void adc_ll_reset_register(void)
+{
+    //For compatibility
 }
 
 /**
@@ -577,6 +593,7 @@ static inline void adc_ll_set_power_manage(adc_ll_power_t manage)
  * @param adc_n ADC unit.
  * @param ctrl ADC controller.
  */
+__attribute__((always_inline))
 static inline void adc_ll_set_controller(adc_unit_t adc_n, adc_ll_controller_t ctrl)
 {
     if (adc_n == ADC_UNIT_1) {

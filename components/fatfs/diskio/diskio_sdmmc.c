@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2015-2021 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2015-2025 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -12,6 +12,7 @@
 #include "esp_compiler.h"
 
 static sdmmc_card_t* s_cards[FF_VOLUMES] = { NULL };
+static bool s_disk_status_check_en[FF_VOLUMES] = { };
 
 static const char* TAG = "diskio_sdmmc";
 
@@ -33,42 +34,45 @@ static DSTATUS ff_sdmmc_card_available(BYTE pdrv)
 *   fails. This error value is checked throughout the FATFS code.
 *   Both functions return 0 on success.
 */
-DSTATUS ff_sdmmc_initialize (BYTE pdrv)
+static DSTATUS ff_sdmmc_initialize (BYTE pdrv)
 {
     return ff_sdmmc_card_available(pdrv);
 }
 
-DSTATUS ff_sdmmc_status (BYTE pdrv)
+static DSTATUS ff_sdmmc_status(BYTE pdrv)
 {
-    return ff_sdmmc_card_available(pdrv);
+    if (s_disk_status_check_en[pdrv]) {
+        return ff_sdmmc_card_available(pdrv);
+    }
+    return 0;
 }
 
-DRESULT ff_sdmmc_read (BYTE pdrv, BYTE* buff, DWORD sector, UINT count)
+static DRESULT ff_sdmmc_read (BYTE pdrv, BYTE* buff, DWORD sector, UINT count)
 {
     sdmmc_card_t* card = s_cards[pdrv];
     assert(card);
     esp_err_t err = sdmmc_read_sectors(card, buff, sector, count);
     if (unlikely(err != ESP_OK)) {
-        ESP_LOGE(TAG, "sdmmc_read_blocks failed (%d)", err);
+        ESP_LOGE(TAG, "sdmmc_read_blocks failed (0x%x)", err);
         return RES_ERROR;
     }
     return RES_OK;
 }
 
-DRESULT ff_sdmmc_write (BYTE pdrv, const BYTE* buff, DWORD sector, UINT count)
+static DRESULT ff_sdmmc_write (BYTE pdrv, const BYTE* buff, DWORD sector, UINT count)
 {
     sdmmc_card_t* card = s_cards[pdrv];
     assert(card);
     esp_err_t err = sdmmc_write_sectors(card, buff, sector, count);
     if (unlikely(err != ESP_OK)) {
-        ESP_LOGE(TAG, "sdmmc_write_blocks failed (%d)", err);
+        ESP_LOGE(TAG, "sdmmc_write_blocks failed (0x%x)", err);
         return RES_ERROR;
     }
     return RES_OK;
 }
 
 #if FF_USE_TRIM
-DRESULT ff_sdmmc_trim (BYTE pdrv, DWORD start_sector, DWORD sector_count)
+static DRESULT ff_sdmmc_trim (BYTE pdrv, DWORD start_sector, DWORD sector_count)
 {
     sdmmc_card_t* card = s_cards[pdrv];
     assert(card);
@@ -84,7 +88,7 @@ DRESULT ff_sdmmc_trim (BYTE pdrv, DWORD start_sector, DWORD sector_count)
 }
 #endif //FF_USE_TRIM
 
-DRESULT ff_sdmmc_ioctl (BYTE pdrv, BYTE cmd, void* buff)
+static DRESULT ff_sdmmc_ioctl (BYTE pdrv, BYTE cmd, void* buff)
 {
     sdmmc_card_t* card = s_cards[pdrv];
     assert(card);
@@ -101,18 +105,19 @@ DRESULT ff_sdmmc_ioctl (BYTE pdrv, BYTE cmd, void* buff)
             return RES_ERROR;
 #if FF_USE_TRIM
         case CTRL_TRIM:
-            /*
-             * limitation with sector erase when used in SDSPI mode
-             * hence return if host is SPI.
-             */
-            if ((card->host.flags & SDMMC_HOST_FLAG_SPI) != 0) {
-                return RES_ERROR;
+            if (sdmmc_can_trim(card) != ESP_OK) {
+                return RES_PARERR;
             }
             return ff_sdmmc_trim (pdrv, *((DWORD*)buff), //start_sector
                     (*((DWORD*)buff + 1) - *((DWORD*)buff) + 1)); //sector_count
 #endif //FF_USE_TRIM
     }
     return RES_ERROR;
+}
+
+void ff_sdmmc_set_disk_status_check(BYTE pdrv, bool enable)
+{
+    s_disk_status_check_en[pdrv] = enable;
 }
 
 void ff_diskio_register_sdmmc(BYTE pdrv, sdmmc_card_t* card)
@@ -125,6 +130,7 @@ void ff_diskio_register_sdmmc(BYTE pdrv, sdmmc_card_t* card)
         .ioctl = &ff_sdmmc_ioctl
     };
     s_cards[pdrv] = card;
+    s_disk_status_check_en[pdrv] = false;
     ff_diskio_register(pdrv, &sdmmc_impl);
 }
 

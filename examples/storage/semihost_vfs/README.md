@@ -1,3 +1,6 @@
+| Supported Targets | ESP32 | ESP32-C2 | ESP32-C3 | ESP32-C5 | ESP32-C6 | ESP32-C61 | ESP32-H2 | ESP32-H21 | ESP32-P4 | ESP32-S2 | ESP32-S3 |
+| ----------------- | ----- | -------- | -------- | -------- | -------- | --------- | -------- | --------- | -------- | -------- | -------- |
+
 # Semihosting VFS driver example
 
 (See the README.md file in the upper level 'examples' directory for more information about examples.)
@@ -94,16 +97,16 @@ There are two outputs produced by example:
    ```
    W (274) example: Switch to semihosted stdout
    W (274) example: Switched back to UART stdout
-   I (274) example: Wrote 2798 bytes
+   I (274) example: Wrote 2776 bytes
    ====================== HOST DATA START =========================
    The following are the graphical (non-control) characters defined by
    ISO 8859-1 (1987).  Descriptions in words aren't all that helpful,
    but they're the best we can do in text.  A graphics file illustrating
    the character set should be available from the same archive as this
    file.
-   
+
    Hex Description                 Hex Description
-   
+
    20  SPACE
    ...
    7D  RIGHT CURLY BRACKET         FD  SMALL LETTER Y WITH ACUTE
@@ -112,4 +115,3 @@ There are two outputs produced by example:
    ====================== HOST DATA END =========================
    I (694) example: Read 6121 bytes
    ```
-

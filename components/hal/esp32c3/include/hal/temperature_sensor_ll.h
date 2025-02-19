@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020-2022 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2020-2023 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -16,13 +16,15 @@
 
 #include <stdbool.h>
 #include <stdlib.h>
-#include "esp_private/regi2c_ctrl.h"
-#include "regi2c_saradc.h"
+#include "hal/regi2c_ctrl.h"
+#include "soc/regi2c_saradc.h"
 #include "soc/apb_saradc_struct.h"
 #include "soc/soc.h"
 #include "soc/soc_caps.h"
+#include "soc/system_struct.h"
 #include "hal/temperature_sensor_types.h"
 #include "hal/assert.h"
+#include "hal/misc.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -31,25 +33,8 @@ extern "C" {
 #define TEMPERATURE_SENSOR_LL_ADC_FACTOR     (0.4386)
 #define TEMPERATURE_SENSOR_LL_DAC_FACTOR     (27.88)
 #define TEMPERATURE_SENSOR_LL_OFFSET_FACTOR  (20.52)
-
-#define TEMPERATURE_SENSOR_LL_RANGE_NUM (5)
-
-typedef struct {
-    int offset;
-    int reg_val;
-    int range_min;
-    int range_max;
-    int error_max;
-} temp_sensor_ll_attribute_t;
-
-static const temp_sensor_ll_attribute_t temp_sensor_ll_attributes[TEMPERATURE_SENSOR_LL_RANGE_NUM] = {
-    /*Offset, reg_val, min, max, error */
-    {   -2,     5,    50,  125,   3},
-    {   -1,     7,    20,  100,   2},
-    {    0,    15,   -10,   80,   1},
-    {    1,    11,   -30,   50,   2},
-    {    2,    10,   -40,   20,   3},
-};
+#define TEMPERATURE_SENSOR_LL_MEASURE_MAX    (125)
+#define TEMPERATURE_SENSOR_LL_MEASURE_MIN    (-40)
 
 /**
  * @brief Enable the temperature sensor power.
@@ -64,10 +49,27 @@ static inline void temperature_sensor_ll_enable(bool enable)
 /**
  * @brief Enable the clock
  */
-static inline void temperature_sensor_ll_clk_enable(bool enable)
+static inline void temperature_sensor_ll_bus_clk_enable(bool enable)
 {
-    // No need to enable the temperature clock on esp32c3
+    SYSTEM.perip_clk_en1.reg_tsens_clk_en = enable;
 }
+
+/// use a macro to wrap the function, force the caller to use it in a critical section
+/// the critical section needs to declare the __DECLARE_RCC_ATOMIC_ENV variable in advance
+#define temperature_sensor_ll_bus_clk_enable(...) do {(void)__DECLARE_RCC_ATOMIC_ENV; temperature_sensor_ll_bus_clk_enable(__VA_ARGS__);} while(0)
+
+/**
+ * @brief Reset the Temperature sensor module
+ */
+static inline void temperature_sensor_ll_reset_module(void)
+{
+    SYSTEM.perip_rst_en1.reg_tsens_rst = 1;
+    SYSTEM.perip_rst_en1.reg_tsens_rst = 0;
+}
+
+/// use a macro to wrap the function, force the caller to use it in a critical section
+/// the critical section needs to declare the __DECLARE_RCC_ATOMIC_ENV variable in advance
+#define temperature_sensor_ll_reset_module(...) do {(void)__DECLARE_RCC_ATOMIC_ENV; temperature_sensor_ll_reset_module(__VA_ARGS__);} while(0)
 
 /**
  * @brief Select the clock source for temperature sensor. On ESP32-C3, temperautre sensor
@@ -93,14 +95,12 @@ static inline void temperature_sensor_ll_clk_sel(temperature_sensor_clk_src_t cl
 }
 
 /**
- * @brief Set the hardware range, you can refer to the table ``temp_sensor_ll_attributes``
+ * @brief Set the hardware range, you can refer to the table ``temperature_sensor_attributes``
  *
- * @param tsens_dac ``reg_val`` in table ``temp_sensor_ll_attributes``
+ * @param tsens_dac ``reg_val`` in table ``temperature_sensor_attributes``
  */
 static inline void temperature_sensor_ll_set_range(uint32_t range)
 {
-    CLEAR_PERI_REG_MASK(ANA_CONFIG_REG, ANA_I2C_SAR_FORCE_PD);
-    SET_PERI_REG_MASK(ANA_CONFIG2_REG, ANA_I2C_SAR_FORCE_PU);
     REGI2C_WRITE_MASK(I2C_SAR_ADC, I2C_SARADC_TSENS_DAC, range);
 }
 
@@ -111,7 +111,7 @@ static inline void temperature_sensor_ll_set_range(uint32_t range)
  */
 static inline uint32_t temperature_sensor_ll_get_raw_value(void)
 {
-    return APB_SARADC.apb_tsens_ctrl.tsens_out;
+    return HAL_FORCE_READ_U32_REG_FIELD(APB_SARADC.apb_tsens_ctrl, tsens_out);
 }
 
 /**
@@ -135,7 +135,7 @@ static inline uint32_t temperature_sensor_ll_get_offset(void)
  */
 static inline uint32_t temperature_sensor_ll_get_clk_div(void)
 {
-    return APB_SARADC.apb_tsens_ctrl.tsens_clk_div;
+    return HAL_FORCE_READ_U32_REG_FIELD(APB_SARADC.apb_tsens_ctrl, tsens_clk_div);
 }
 
 /**
@@ -148,7 +148,7 @@ static inline uint32_t temperature_sensor_ll_get_clk_div(void)
  */
 static inline void temperature_sensor_ll_set_clk_div(uint8_t clk_div)
 {
-    APB_SARADC.apb_tsens_ctrl.tsens_clk_div = clk_div;
+    HAL_FORCE_MODIFY_U32_REG_FIELD(APB_SARADC.apb_tsens_ctrl, tsens_clk_div, clk_div);
 }
 
 #ifdef __cplusplus

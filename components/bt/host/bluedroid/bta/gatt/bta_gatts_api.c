@@ -603,41 +603,41 @@ void BTA_GATTS_SendServiceChangeIndication(tBTA_GATTS_IF server_if, BD_ADDR remo
 
 }
 
-/*******************************************************************************
-**
-** Function         BTA_GATTS_Listen
-**
-** Description      Start advertisement to listen for connection request for a
-**                  GATT server
-**
-** Parameters       server_if: server interface.
-**                  start: to start or stop listening for connection
-**                  remote_bda: remote device BD address, if listen to all device
-**                              use NULL.
-**
-** Returns          void
-**
-*******************************************************************************/
-void BTA_GATTS_Listen(tBTA_GATTS_IF server_if, BOOLEAN start, BD_ADDR_PTR target_bda)
+uint8_t BTA_GATTS_SetServiceChangeMode(uint8_t mode)
 {
-    tBTA_GATTS_API_LISTEN  *p_buf;
+    tGATT_STATUS status;
+    APPL_TRACE_DEBUG("%s mode %u", __func__, mode);
 
-    if ((p_buf = (tBTA_GATTS_API_LISTEN *) osi_malloc((UINT16)(sizeof(tBTA_GATTS_API_LISTEN) + BD_ADDR_LEN))) != NULL) {
-        p_buf->hdr.event = BTA_GATTS_API_LISTEN_EVT;
-
-        p_buf->server_if    = server_if;
-        p_buf->start        = start;
-
-        if (target_bda) {
-            p_buf->remote_bda = (UINT8 *)(p_buf + 1);
-            memcpy(p_buf->remote_bda, target_bda, BD_ADDR_LEN);
-        } else {
-            p_buf->remote_bda = NULL;
-        }
-
-        bta_sys_sendmsg(p_buf);
+    status = GATTS_SetServiceChangeMode(mode);
+    if (status != GATT_SUCCESS) {
+        APPL_TRACE_ERROR("%s status %x", __func__, status);
+        return -1;
     }
-    return;
+
+    return 0;
 }
 
+uint8_t BTA_GATTS_SendMultiNotification(uint8_t gatt_if, uint16_t conn_id, void *tuples, uint16_t num_tuples)
+{
+    tGATT_STATUS status;
+    conn_id = (UINT16)((((UINT8)conn_id) << 8) | gatt_if);
+
+    status = GATTS_HandleMultiValueNotification(conn_id, (tGATT_HLV *)tuples, num_tuples);
+    if (status != GATT_SUCCESS) {
+        APPL_TRACE_ERROR("%s status %x", __func__, status);
+        return -1;
+    }
+
+    return 0;
+}
+
+void BTA_GATTS_ShowLocalDatabase(void)
+{
+    BT_HDR  *p_buf;
+
+    if ((p_buf = (BT_HDR *) osi_malloc(sizeof(BT_HDR))) != NULL) {
+        p_buf->event = BTA_GATTS_API_SHOW_LOCAL_DATABASE_EVT;
+        bta_sys_sendmsg(p_buf);
+    }
+}
 #endif /* BTA_GATT_INCLUDED */

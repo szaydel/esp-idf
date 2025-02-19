@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2018-2021 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2018-2025 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -22,13 +22,17 @@
 extern "C" {
 #endif
 
-/* Size of request data block/chunk (not to be confused with chunked encoded data)
- * that is received and parsed in one turn of the parsing process. This should not
- * exceed the scratch buffer size and should at least be 8 bytes */
-#define PARSER_BLOCK_SIZE  128
+#if CONFIG_NEWLIB_NANO_FORMAT
+#define NEWLIB_NANO_COMPAT_FORMAT            PRIu32
+#define NEWLIB_NANO_COMPAT_CAST(size_t_var)  (uint32_t)size_t_var
+#else
+#define NEWLIB_NANO_COMPAT_FORMAT            "zu"
+#define NEWLIB_NANO_COMPAT_CAST(size_t_var)  size_t_var
+#endif
 
-/* Calculate the maximum size needed for the scratch buffer */
-#define HTTPD_SCRATCH_BUF  MAX(HTTPD_MAX_REQ_HDR_LEN, HTTPD_MAX_URI_LEN)
+/* Size of request data block/chunk (not to be confused with chunked encoded data)
+ * that is received and parsed in one turn of the parsing process. */
+#define PARSER_BLOCK_SIZE  128
 
 /* Formats a log string to prepend context function name */
 #define LOG_FMT(x)      "%s: " x, __func__
@@ -64,6 +68,7 @@ struct sock_db {
     bool lru_socket;                        /*!< Flag indicating LRU socket */
     char pending_data[PARSER_BLOCK_SIZE];   /*!< Buffer for pending data to be received */
     size_t pending_len;                     /*!< Length of pending data to be received */
+    bool for_async_req;                     /*!< If true, the socket will not be LRU purged */
 #ifdef CONFIG_HTTPD_WS_SUPPORT
     bool ws_handshake_done;                 /*!< True if it has done WebSocket handshake (if this socket is a valid WS) */
     bool ws_close;                          /*!< Set to true to close the socket later (when WS Close frame received) */
@@ -79,7 +84,11 @@ struct sock_db {
  */
 struct httpd_req_aux {
     struct sock_db *sd;                             /*!< Pointer to socket database */
-    char            scratch[HTTPD_SCRATCH_BUF + 1]; /*!< Temporary buffer for our operations (1 byte extra for null termination) */
+    char           *scratch;                        /*!< Temporary buffer for our operations (1 byte extra for null termination) */
+    size_t          scratch_size_limit;             /*!< Scratch buffer size limit (By default this value is set to CONFIG_HTTPD_MAX_REQ_HDR_LEN, overwrite is possible) */
+    size_t          scratch_cur_size;               /*!< Scratch buffer cur size (By default this value is set to CONFIG_HTTPD_MAX_URI_LEN, overwrite is possible) */
+    size_t          max_req_hdr_len;             /*!< Header buffer size limit */
+    size_t          max_uri_len;             /*!< URI buffer size limit */
     size_t          remaining_len;                  /*!< Amount of data remaining to be fetched */
     char           *status;                         /*!< HTTP response's status code */
     char           *content_type;                   /*!< HTTP response's content type */
@@ -501,7 +510,7 @@ int httpd_default_recv(httpd_handle_t hd, int sockfd, char *buf, size_t buf_len,
  * @param[in] req                       Pointer to handshake request that will be handled
  * @param[in] supported_subprotocol     Pointer to the subprotocol supported by this URI
  * @return
- *  - ESP_OK                        : When handshake is sucessful
+ *  - ESP_OK                        : When handshake is successful
  *  - ESP_ERR_NOT_FOUND             : When some headers (Sec-WebSocket-*) are not found
  *  - ESP_ERR_INVALID_VERSION       : The WebSocket version is not "13"
  *  - ESP_ERR_INVALID_STATE         : Handshake was done beforehand
@@ -516,7 +525,7 @@ esp_err_t httpd_ws_respond_server_handshake(httpd_req_t *req, const char *suppor
  *
  * @param[in] req    Pointer to handshake request that will be handled
  * @return
- *  - ESP_OK                        : When handshake is sucessful
+ *  - ESP_OK                        : When handshake is successful
  *  - ESP_ERR_INVALID_ARG           : Argument is invalid (null or non-WebSocket)
  *  - ESP_ERR_INVALID_STATE         : Received only some parts of a control frame
  *  - ESP_FAIL                      : Socket failures
@@ -543,6 +552,18 @@ esp_err_t httpd_sess_trigger_close_(httpd_handle_t handle, struct sock_db *sessi
 /** End of WebSocket related functions
  * @}
  */
+
+#if CONFIG_HTTPD_SERVER_EVENT_POST_TIMEOUT == -1
+#define ESP_HTTP_SERVER_EVENT_POST_TIMEOUT portMAX_DELAY
+#else
+#define ESP_HTTP_SERVER_EVENT_POST_TIMEOUT pdMS_TO_TICKS(CONFIG_HTTPD_SERVER_EVENT_POST_TIMEOUT)
+#endif
+
+/**
+ * @brief Function to dispatch events in default event loop
+ *
+ */
+void esp_http_server_dispatch_event(int32_t event_id, const void* event_data, size_t event_data_size);
 
 #ifdef __cplusplus
 }

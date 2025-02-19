@@ -1,16 +1,8 @@
-// Copyright 2015-2021 Espressif Systems (Shanghai) PTE LTD
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+/*
+ * SPDX-FileCopyrightText: 2022-2024 Espressif Systems (Shanghai) CO LTD
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 /*******************************************************************************
  * NOTICE
@@ -19,19 +11,24 @@
  ******************************************************************************/
 
 // The Lowlevel layer for SPI Flash Encryption.
+#pragma once
 
-#include "hal/assert.h"
-#include "soc/system_reg.h"
-#include "soc/hwcrypto_reg.h"
-#include "soc/soc.h"
-#include "string.h"
 #include <stdbool.h>
+#include <string.h>
+#include "soc/hp_system_reg.h"
+#include "soc/xts_aes_reg.h"
+#include "soc/soc.h"
+#include "soc/soc_caps.h"
+#include "hal/assert.h"
+
+#include "hal/efuse_hal.h"
+#include "soc/chip_revision.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/// Choose type of chip you want to encrypt manully
+/// Choose type of chip you want to encrypt manually
 typedef enum
 {
     FLASH_ENCRYPTION_MANU = 0, ///!< Manually encrypt the flash chip.
@@ -43,9 +40,9 @@ typedef enum
  */
 static inline void spi_flash_encrypt_ll_enable(void)
 {
-    REG_SET_BIT(SYSTEM_EXTERNAL_DEVICE_ENCRYPT_DECRYPT_CONTROL_REG,
-                SYSTEM_ENABLE_DOWNLOAD_MANUAL_ENCRYPT |
-                SYSTEM_ENABLE_SPI_MANUAL_ENCRYPT);
+    REG_SET_BIT(HP_SYSTEM_EXTERNAL_DEVICE_ENCRYPT_DECRYPT_CONTROL_REG,
+                HP_SYSTEM_ENABLE_DOWNLOAD_MANUAL_ENCRYPT |
+                HP_SYSTEM_ENABLE_SPI_MANUAL_ENCRYPT);
 }
 
 /*
@@ -53,12 +50,12 @@ static inline void spi_flash_encrypt_ll_enable(void)
  */
 static inline void spi_flash_encrypt_ll_disable(void)
 {
-    REG_CLR_BIT(SYSTEM_EXTERNAL_DEVICE_ENCRYPT_DECRYPT_CONTROL_REG,
-                SYSTEM_ENABLE_SPI_MANUAL_ENCRYPT);
+    REG_CLR_BIT(HP_SYSTEM_EXTERNAL_DEVICE_ENCRYPT_DECRYPT_CONTROL_REG,
+                HP_SYSTEM_ENABLE_SPI_MANUAL_ENCRYPT);
 }
 
 /**
- * Choose type of chip you want to encrypt manully
+ * Choose type of chip you want to encrypt manually
  *
  * @param type The type of chip to be encrypted
  *
@@ -68,7 +65,7 @@ static inline void spi_flash_encrypt_ll_type(flash_encrypt_ll_type_t type)
 {
     // Our hardware only support flash encryption
     HAL_ASSERT(type == FLASH_ENCRYPTION_MANU);
-    REG_WRITE(AES_XTS_DESTINATION_REG, type);
+    REG_SET_FIELD(XTS_AES_DESTINATION_REG(0), XTS_AES_DESTINATION, type);
 }
 
 /**
@@ -79,7 +76,7 @@ static inline void spi_flash_encrypt_ll_type(flash_encrypt_ll_type_t type)
 static inline void spi_flash_encrypt_ll_buffer_length(uint32_t size)
 {
     // Desired block should not be larger than the block size.
-    REG_WRITE(AES_XTS_SIZE_REG, size >> 5);
+    REG_SET_FIELD(XTS_AES_LINESIZE_REG(0), XTS_AES_LINESIZE, size >> 5);
 }
 
 /**
@@ -92,8 +89,9 @@ static inline void spi_flash_encrypt_ll_buffer_length(uint32_t size)
  */
 static inline void spi_flash_encrypt_ll_plaintext_save(uint32_t address, const uint32_t* buffer, uint32_t size)
 {
-    uint32_t plaintext_offs = (address % 64);
-    memcpy((void *)(AES_XTS_PLAIN_BASE + plaintext_offs), buffer, size);
+    uint32_t plaintext_offs = (address % SOC_FLASH_ENCRYPTED_XTS_AES_BLOCK_MAX);
+    HAL_ASSERT(plaintext_offs + size <= SOC_FLASH_ENCRYPTED_XTS_AES_BLOCK_MAX);
+    memcpy((void *)(XTS_AES_PLAIN_MEM(0) + plaintext_offs), buffer, size);
 }
 
 /**
@@ -103,7 +101,7 @@ static inline void spi_flash_encrypt_ll_plaintext_save(uint32_t address, const u
  */
 static inline void spi_flash_encrypt_ll_address_save(uint32_t flash_addr)
 {
-    REG_WRITE(AES_XTS_PHYSICAL_ADDR_REG, flash_addr);
+    REG_SET_FIELD(XTS_AES_PHYSICAL_ADDRESS_REG(0), XTS_AES_PHYSICAL_ADDRESS, flash_addr);
 }
 
 /**
@@ -111,7 +109,7 @@ static inline void spi_flash_encrypt_ll_address_save(uint32_t flash_addr)
  */
 static inline void spi_flash_encrypt_ll_calculate_start(void)
 {
-    REG_WRITE(AES_XTS_TRIGGER_REG, 1);
+    REG_SET_FIELD(XTS_AES_TRIGGER_REG(0), XTS_AES_TRIGGER, 1);
 }
 
 /**
@@ -119,7 +117,7 @@ static inline void spi_flash_encrypt_ll_calculate_start(void)
  */
 static inline void spi_flash_encrypt_ll_calculate_wait_idle(void)
 {
-    while(REG_READ(AES_XTS_STATE_REG) == 0x1) {
+    while(REG_GET_FIELD(XTS_AES_STATE_REG(0), XTS_AES_STATE) == 0x1) {
     }
 }
 
@@ -128,8 +126,8 @@ static inline void spi_flash_encrypt_ll_calculate_wait_idle(void)
  */
 static inline void spi_flash_encrypt_ll_done(void)
 {
-    REG_WRITE(AES_XTS_RELEASE_REG, 1);
-    while(REG_READ(AES_XTS_STATE_REG) != 0x3) {
+    REG_SET_BIT(XTS_AES_RELEASE_REG(0), XTS_AES_RELEASE);
+    while(REG_GET_FIELD(XTS_AES_STATE_REG(0), XTS_AES_STATE) != 0x3) {
     }
 }
 
@@ -138,7 +136,7 @@ static inline void spi_flash_encrypt_ll_done(void)
  */
 static inline void spi_flash_encrypt_ll_destroy(void)
 {
-    REG_WRITE(AES_XTS_DESTROY_REG, 1);
+    REG_SET_BIT(XTS_AES_DESTROY_REG(0), XTS_AES_DESTROY);
 }
 
 /**
@@ -150,6 +148,39 @@ static inline void spi_flash_encrypt_ll_destroy(void)
 static inline bool spi_flash_encrypt_ll_check(uint32_t address, uint32_t length)
 {
     return ((address % length) == 0) ? true : false;
+}
+
+/**
+ * @brief Enable the pseudo-round function during XTS-AES operations
+ *
+ * @param mode set the mode for pseudo rounds, zero to disable, with increasing security upto three.
+ * @param base basic number of pseudo rounds, zero if disable
+ * @param increment increment number of pseudo rounds, zero if disable
+ * @param key_rng_cnt update frequency of the pseudo-key, zero if disable
+ */
+static inline void spi_flash_encrypt_ll_enable_pseudo_rounds(uint8_t mode, uint8_t base, uint8_t increment, uint8_t key_rng_cnt)
+{
+    REG_SET_FIELD(XTS_AES_PSEUDO_ROUND_CONF_REG(0), XTS_AES_MODE_PSEUDO, mode);
+
+    if (mode) {
+        REG_SET_FIELD(XTS_AES_PSEUDO_ROUND_CONF_REG(0), XTS_AES_PSEUDO_BASE, base);
+        REG_SET_FIELD(XTS_AES_PSEUDO_ROUND_CONF_REG(0), XTS_AES_PSEUDO_INC, increment);
+        REG_SET_FIELD(XTS_AES_PSEUDO_ROUND_CONF_REG(0), XTS_AES_PSEUDO_RNG_CNT, key_rng_cnt);
+    } else {
+        REG_SET_FIELD(XTS_AES_PSEUDO_ROUND_CONF_REG(0), XTS_AES_PSEUDO_BASE, 0);
+        REG_SET_FIELD(XTS_AES_PSEUDO_ROUND_CONF_REG(0), XTS_AES_PSEUDO_INC, 0);
+        REG_SET_FIELD(XTS_AES_PSEUDO_ROUND_CONF_REG(0), XTS_AES_PSEUDO_RNG_CNT, 0);
+    }
+}
+
+/**
+ * @brief Check if the pseudo round function is supported
+ * The XTS-AES pseudo round function is only avliable in chip version
+ * above 1.2 in ESP32-H2
+ */
+static inline bool spi_flash_encrypt_ll_is_pseudo_rounds_function_supported(void)
+{
+    return ESP_CHIP_REV_ABOVE(efuse_hal_chip_revision(), 102);
 }
 
 #ifdef __cplusplus

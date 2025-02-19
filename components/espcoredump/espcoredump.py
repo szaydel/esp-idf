@@ -1,9 +1,9 @@
+#!/usr/bin/env python
 #
 # SPDX-FileCopyrightText: 2022 Espressif Systems (Shanghai) CO LTD
 #
 # SPDX-License-Identifier: Apache-2.0
 #
-
 import json
 import logging
 import os.path
@@ -25,7 +25,7 @@ def get_prefix_map_gdbinit_path(prog_path):  # type: (str) -> Any
         logging.warning('%s does not exist. Please build the app with "idf.py build"', desc_path)
         return ''
 
-    with open(desc_path, 'r') as f:
+    with open(desc_path, 'r', encoding='utf-8') as f:
         project_desc = json.load(f)
 
     return project_desc.get('debug_prefix_map_gdbinit')
@@ -50,8 +50,8 @@ def main():  # type: () -> None
     # pass the extra_gdbinit_file if the build is reproducible
     kwargs['extra_gdbinit_file'] = get_prefix_map_gdbinit_path(kwargs['prog'])
 
-    del(kwargs['debug'])
-    del(kwargs['operation'])
+    del kwargs['debug']
+    del kwargs['operation']
 
     espcoredump = CoreDump(**kwargs)
     temp_core_files = None

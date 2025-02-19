@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2015-2021 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2015-2024 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -11,22 +11,21 @@
 #include "sdkconfig.h"
 #include "esp_attr.h"
 #include "esp_log.h"
+#include "esp_cpu.h"
 #include "esp_clk_internal.h"
 #include "esp_rom_uart.h"
 #include "esp_rom_sys.h"
 #include "soc/system_reg.h"
-#include "soc/dport_access.h"
+#include "soc/dport_reg.h"
 #include "soc/soc.h"
 #include "soc/rtc.h"
 #include "soc/rtc_periph.h"
 #include "soc/i2s_reg.h"
-#include "hal/cpu_hal.h"
 #include "hal/wdt_hal.h"
 #include "esp_private/periph_ctrl.h"
 #include "esp_private/esp_clk.h"
 #include "bootloader_clock.h"
 #include "soc/syscon_reg.h"
-#include "hal/clk_gate_ll.h"
 
 static const char *TAG = "clk";
 
@@ -41,11 +40,6 @@ static const char *TAG = "clk";
 #else
 #define RTC_XTAL_CAL_RETRY 1
 #endif
-
-/* Lower threshold for a reasonably-looking calibration value for a 32k XTAL.
- * The ideal value (assuming 32768 Hz frequency) is 1000000/32768*(2**19) = 16*10^6.
- */
-#define MIN_32K_XTAL_CAL_VAL  15000000L
 
 /* Indicates that this 32k oscillator gets input from external oscillator, rather
  * than a crystal.
@@ -65,15 +59,26 @@ typedef enum {
 
 static void select_rtc_slow_clk(slow_clk_sel_t slow_clk);
 
- __attribute__((weak)) void esp_clk_init(void)
+void esp_rtc_init(void)
 {
     rtc_config_t cfg = RTC_CONFIG_DEFAULT();
     soc_reset_reason_t rst_reas = esp_rom_get_reset_reason(0);
     if (rst_reas == RESET_REASON_CHIP_POWER_ON) {
         cfg.cali_ocode = 1;
+        /* Ocode calibration will switch to XTAL frequency, need to wait for UART FIFO
+         * to be empty, to avoid garbled output.
+         */
+        if (CONFIG_ESP_CONSOLE_ROM_SERIAL_PORT_NUM >= 0) {
+            esp_rom_output_tx_wait_idle(CONFIG_ESP_CONSOLE_ROM_SERIAL_PORT_NUM);
+        }
     }
     rtc_init(cfg);
+}
 
+__attribute__((weak)) void esp_clk_init(void)
+{
+    bool rc_fast_d256_is_enabled = rtc_clk_8md256_enabled();
+    rtc_clk_8m_enable(true, rc_fast_d256_is_enabled);
     rtc_clk_fast_src_set(SOC_RTC_FAST_CLK_SRC_RC_FAST);
 
 #ifdef CONFIG_BOOTLOADER_WDT_ENABLE
@@ -120,8 +125,8 @@ static void select_rtc_slow_clk(slow_clk_sel_t slow_clk);
 
     // Wait for UART TX to finish, otherwise some UART output will be lost
     // when switching APB frequency
-    if (CONFIG_ESP_CONSOLE_UART_NUM >= 0) {
-        esp_rom_uart_tx_wait_idle(CONFIG_ESP_CONSOLE_UART_NUM);
+    if (CONFIG_ESP_CONSOLE_ROM_SERIAL_PORT_NUM >= 0) {
+        esp_rom_output_tx_wait_idle(CONFIG_ESP_CONSOLE_ROM_SERIAL_PORT_NUM);
     }
 
     if (res) {
@@ -129,7 +134,7 @@ static void select_rtc_slow_clk(slow_clk_sel_t slow_clk);
     }
 
     // Re calculate the ccount to make time calculation correct.
-    cpu_hal_set_cycle_count( (uint64_t)cpu_hal_get_cycle_count() * new_freq_mhz / old_freq_mhz );
+    esp_cpu_set_cycle_count((uint64_t)esp_cpu_get_cycle_count() * new_freq_mhz / old_freq_mhz);
 }
 
 static void select_rtc_slow_clk(slow_clk_sel_t slow_clk)
@@ -162,7 +167,7 @@ static void select_rtc_slow_clk(slow_clk_sel_t slow_clk)
             // When SLOW_CLK_CAL_CYCLES is set to 0, clock calibration will not be performed at startup.
             if (SLOW_CLK_CAL_CYCLES > 0) {
                 cal_val = rtc_clk_cal(RTC_CAL_32K_XTAL, SLOW_CLK_CAL_CYCLES);
-                if (cal_val == 0 || cal_val < MIN_32K_XTAL_CAL_VAL) {
+                if (cal_val == 0) {
                     if (retry_32k_xtal-- > 0) {
                         continue;
                     }
@@ -182,10 +187,10 @@ static void select_rtc_slow_clk(slow_clk_sel_t slow_clk)
             cal_val = rtc_clk_cal(RTC_CAL_RTC_MUX, SLOW_CLK_CAL_CYCLES);
         } else {
             const uint64_t cal_dividend = (1ULL << RTC_CLK_CAL_FRACT) * 1000000ULL;
-            cal_val = (uint32_t) (cal_dividend / rtc_clk_slow_freq_get_hz());
+            cal_val = (uint32_t)(cal_dividend / rtc_clk_slow_freq_get_hz());
         }
     } while (cal_val == 0);
-    ESP_EARLY_LOGD(TAG, "RTC_SLOW_CLK calibration value: %d", cal_val);
+    ESP_EARLY_LOGD(TAG, "RTC_SLOW_CLK calibration value: %" PRIu32, cal_val);
     esp_clk_slowclk_cal_set(cal_val);
 }
 
@@ -235,7 +240,6 @@ __attribute__((weak)) void esp_perip_clk_init(void)
                            DPORT_PWM0_CLK_EN |
                            DPORT_TWAI_CLK_EN |
                            DPORT_PWM1_CLK_EN |
-                           DPORT_I2S1_CLK_EN |
                            DPORT_SPI2_DMA_CLK_EN |
                            DPORT_SPI3_DMA_CLK_EN |
                            DPORT_PWM2_CLK_EN |
@@ -271,7 +275,6 @@ __attribute__((weak)) void esp_perip_clk_init(void)
                         DPORT_UHCI1_CLK_EN |
                         DPORT_SPI3_CLK_EN |
                         DPORT_I2C_EXT1_CLK_EN |
-                        DPORT_I2S1_CLK_EN |
                         DPORT_SPI2_DMA_CLK_EN |
                         DPORT_SPI3_DMA_CLK_EN;
     common_perip_clk1 = 0;
@@ -303,9 +306,8 @@ __attribute__((weak)) void esp_perip_clk_init(void)
 
     /* Set WiFi light sleep clock source to RTC slow clock */
     DPORT_REG_SET_FIELD(DPORT_BT_LPCK_DIV_INT_REG, DPORT_BT_LPCK_DIV_NUM, 0);
-    DPORT_CLEAR_PERI_REG_MASK(DPORT_BT_LPCK_DIV_FRAC_REG, DPORT_LPCLK_SEL_8M);
+    DPORT_CLEAR_PERI_REG_MASK(DPORT_BT_LPCK_DIV_FRAC_REG, DPORT_LPCLK_SEL_XTAL32K | DPORT_LPCLK_SEL_XTAL | DPORT_LPCLK_SEL_8M | DPORT_LPCLK_SEL_RTC_SLOW);
     DPORT_SET_PERI_REG_MASK(DPORT_BT_LPCK_DIV_FRAC_REG, DPORT_LPCLK_SEL_RTC_SLOW);
-
 
     /* Enable RNG clock. */
     periph_module_enable(PERIPH_RNG_MODULE);

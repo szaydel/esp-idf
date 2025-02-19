@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2015-2022 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2015-2024 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -8,9 +8,7 @@
 #include <stdbool.h>
 #include "esp_attr.h"
 #include "esp_err.h"
-#ifndef BOOTLOADER_BUILD
-#include "esp_spi_flash.h"
-#endif
+#include "soc/soc_caps.h"
 #include "hal/efuse_ll.h"
 #include "sdkconfig.h"
 
@@ -81,10 +79,53 @@ bool esp_flash_encryption_enabled(void);
  * @note RTC_WDT will reset while encryption operations will be performed (if RTC_WDT is configured).
  *
  * @return ESP_OK if all operations succeeded, ESP_ERR_INVALID_STATE
- * if a fatal error occured during encryption of all partitions.
+ * if a fatal error occurred during encryption of all partitions.
  */
 esp_err_t esp_flash_encrypt_check_and_update(void);
 
+/** @brief Returns the Flash Encryption state and prints it
+ *
+ * @return True  - Flash Encryption is enabled
+ *         False - Flash Encryption is not enabled
+ */
+bool esp_flash_encrypt_state(void);
+
+/** @brief Checks if the first initialization was done
+ *
+ * If the first initialization was done then FLASH_CRYPT_CNT != 0
+ *
+ * @return true - the first initialization was done
+ *         false - the first initialization was NOT done
+ */
+bool esp_flash_encrypt_initialized_once(void);
+
+/** @brief The first initialization of Flash Encryption key and related eFuses
+ *
+ * @return ESP_OK if all operations succeeded
+ */
+esp_err_t esp_flash_encrypt_init(void);
+
+/** @brief Encrypts flash content
+ *
+ * @return ESP_OK if all operations succeeded
+ */
+esp_err_t esp_flash_encrypt_contents(void);
+
+/** @brief Activates Flash encryption on the chip
+ *
+ * It burns FLASH_CRYPT_CNT eFuse based on the CONFIG_SECURE_FLASH_ENCRYPTION_MODE_RELEASE option.
+ *
+ * @return ESP_OK if all operations succeeded
+ */
+esp_err_t esp_flash_encrypt_enable(void);
+
+/** @brief Returns True if the write protection of FLASH_CRYPT_CNT is set
+ *
+ * @param print_error Print error if it is write protected
+ *
+ * @return true - if FLASH_CRYPT_CNT is write protected
+ */
+bool esp_flash_encrypt_is_write_protected(bool print_error);
 
 /** @brief Encrypt-in-place a block of flash sectors
  *
@@ -134,12 +175,38 @@ esp_flash_enc_mode_t esp_get_flash_encryption_mode(void);
  */
 void esp_flash_encryption_init_checks(void);
 
+
+#if BOOTLOADER_BUILD && CONFIG_SECURE_FLASH_ENC_ENABLED
 /** @brief Set all secure eFuse features related to flash encryption
  *
  * @return
- *  - ESP_OK - Successfully
+ *  - ESP_OK - On success
  */
 esp_err_t esp_flash_encryption_enable_secure_features(void);
+
+#if CONFIG_SOC_KEY_MANAGER_FE_KEY_DEPLOY
+/** @brief Enable the key manager for flash encryption
+ *
+ * @return
+ *  - ESP_OK - On success
+ */
+esp_err_t esp_flash_encryption_enable_key_mgr(void);
+#endif // CONFIG_SOC_KEY_MANAGER_FE_KEY_DEPLOY
+
+#endif /* BOOTLOADER_BUILD && CONFIG_SECURE_FLASH_ENC_ENABLED */
+
+/** @brief Returns the verification status for all physical security features of flash encryption in release mode
+ *
+ * If the device has flash encryption feature configured in the release mode,
+ * then it is highly recommended to call this API in the application startup code.
+ * This API verifies the sanity of the eFuse configuration against
+ * the release (production) mode of the flash encryption feature.
+ *
+ * @return
+ *  - True - all eFuses are configured correctly
+ *  - False - not all eFuses are configured correctly.
+ */
+bool esp_flash_encryption_cfg_verify_release_mode(void);
 
 /** @brief Switches Flash Encryption from "Development" to "Release"
  *

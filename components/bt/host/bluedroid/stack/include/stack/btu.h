@@ -166,6 +166,9 @@ typedef void (*tBTU_EVENT_CALLBACK)(BT_HDR *p_hdr);
 /* BTU internal timer for QOS */
 #define BTU_TTYPE_BTM_QOS                           110
 
+/* BTU internal timer for set page timeout*/
+#define BTU_TTYPE_BTM_SET_PAGE_TO                   111
+
 /* BTU Task Signal */
 typedef enum {
     SIG_BTU_START_UP = 0,
@@ -175,6 +178,7 @@ typedef enum {
     SIG_BTU_GENERAL_ALARM,
     SIG_BTU_ONESHOT_ALARM,
     SIG_BTU_L2CAP_ALARM,
+    SIG_BTU_HCI_ADV_RPT_MSG,
     SIG_BTU_NUM,
 } SIG_BTU_t;
 
@@ -297,6 +301,7 @@ bool btu_task_post(uint32_t sig, void *param, uint32_t timeout);
 
 int get_btu_work_queue_size(void);
 
+osi_thread_t *btu_get_current_thread(void);
 /*
 #ifdef __cplusplus
 }

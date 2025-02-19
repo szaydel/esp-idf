@@ -1,11 +1,11 @@
 /*
- * SPDX-FileCopyrightText: 2015-2022 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2015-2024 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
-//#include "esp_common.h"
 #include <stdlib.h>
 #include <string.h>
+#include <assert.h>
 #include "lwip/dhcp.h"
 #include "lwip/err.h"
 #include "lwip/pbuf.h"
@@ -13,13 +13,24 @@
 #include "lwip/mem.h"
 #include "lwip/ip_addr.h"
 #include "lwip/timeouts.h"
+#include "lwip/etharp.h"
+#include "lwip/prot/ethernet.h"
 
 #include "dhcpserver/dhcpserver.h"
 #include "dhcpserver/dhcpserver_options.h"
 
-#if ESP_DHCP
+#if ESP_DHCPS
+
+#ifdef LWIP_HOOK_FILENAME
+#include LWIP_HOOK_FILENAME
+#endif
+
+#ifndef LWIP_HOOK_DHCPS_POST_APPEND_OPTS
+#define LWIP_HOOK_DHCPS_POST_APPEND_OPTS(netif, dhcps, state, pp_opts)
+#endif
 
 #define BOOTP_BROADCAST 0x8000
+#define BROADCAST_BIT_IS_SET(flag) (flag & BOOTP_BROADCAST)
 
 #define DHCP_REQUEST        1
 #define DHCP_REPLY          2
@@ -49,11 +60,37 @@
 #define DHCP_OPTION_PERFORM_ROUTER_DISCOVERY 31
 #define DHCP_OPTION_BROADCAST_ADDRESS 28
 #define DHCP_OPTION_REQ_LIST     55
+#define DHCP_OPTION_CAPTIVEPORTAL_URI 114
 #define DHCP_OPTION_END         255
 
 //#define USE_CLASS_B_NET 1
 #define DHCPS_DEBUG          0
 #define DHCPS_LOG printf
+
+#define IS_INVALID_SUBNET_MASK(x)  (((x-1) | x) != 0xFFFFFFFF)
+/* Notes:
+*  CIDR eliminates the traditional Class A, Class B and Class C addresses.
+ */
+#define IP_CLASS_HOST_NUM(mask)            (0xffffffff & ~mask)
+#define DHCP_CHECK_SUBNET_MASK_IP(mask)                                                               \
+    do {                                                                                                  \
+        if (IS_INVALID_SUBNET_MASK(mask)) {                                                               \
+            DHCPS_LOG("dhcps: Illegal subnet mask.\n");                                                   \
+            return ERR_ARG;                                                                               \
+        }                                                                                                 \
+    } while (0)
+
+#define DHCP_CHECK_IP_MATCH_SUBNET_MASK(mask, ip)                           \
+    u32_t start_ip = 0;                                                     \
+    u32_t end_ip = 0;                                                       \
+    do {                                                                    \
+        start_ip = ip & mask;                                               \
+        end_ip = start_ip | ~mask;                                          \
+        if (ip == end_ip || ip == start_ip) {                               \
+            DHCPS_LOG("dhcps: ip address and subnet mask do not match.\n"); \
+            return ERR_ARG;                                                 \
+        }                                                                   \
+    } while (0)
 
 #define MAX_STATION_NUM CONFIG_LWIP_DHCPS_MAX_STATION_NUM
 
@@ -89,7 +126,7 @@ struct dhcps_t {
     struct netif *dhcps_netif;
     ip4_addr_t broadcast_dhcps;
     ip4_addr_t server_address;
-    ip4_addr_t dns_server;
+    ip4_addr_t dns_server[DNS_TYPE_MAX];
     ip4_addr_t client_address;
     ip4_addr_t client_address_plus;
     ip4_addr_t dhcps_mask;
@@ -99,6 +136,7 @@ struct dhcps_t {
     dhcps_time_t dhcps_lease_time;
     dhcps_offer_t dhcps_offer;
     dhcps_offer_t dhcps_dns;
+    char *dhcps_captiveportal_uri;
     dhcps_cb_t dhcps_cb;
     void* dhcps_cb_arg;
     struct udp_pcb *dhcps_pcb;
@@ -117,7 +155,10 @@ dhcps_t *dhcps_new(void)
         return NULL;
     }
     dhcps->dhcps_netif = NULL;
-    dhcps->dns_server.addr = 0;
+
+    for (int i = 0; i < DNS_TYPE_MAX; i++) {
+        dhcps->dns_server[i].addr = 0;
+    }
 #ifdef USE_CLASS_B_NET
     dhcps->dhcps_mask.addr = PP_HTONL(LWIP_MAKEU32(255, 240, 0, 0));
 #else
@@ -128,6 +169,7 @@ dhcps_t *dhcps_new(void)
     dhcps->dhcps_lease_time = DHCPS_LEASE_TIME_DEF;
     dhcps->dhcps_offer = 0xFF;
     dhcps->dhcps_dns = 0x00;
+    dhcps->dhcps_captiveportal_uri = NULL;
     dhcps->dhcps_pcb = NULL;
     dhcps->state = DHCPS_HANDLE_CREATED;
     return dhcps;
@@ -153,6 +195,18 @@ static void get_ip_info(struct netif * netif, ip_info_t *ip_info)
         ip4_addr_set(&ip_info->netmask, ip_2_ip4(&netif->netmask));
         ip4_addr_set(&ip_info->gw, ip_2_ip4(&netif->gw));
     }
+}
+
+static inline u8_t* dhcps_option_ip(u8_t *optptr, const ip4_addr_t *ip)
+{
+    LWIP_ASSERT("dhcps_option_ip: optptr must not be NULL", (optptr != NULL));
+    LWIP_ASSERT("dhcps_option_ip: ip must not be NULL", (ip != NULL));
+
+    *optptr++ = ip4_addr1(ip);
+    *optptr++ = ip4_addr2(ip);
+    *optptr++ = ip4_addr3(ip);
+    *optptr++ = ip4_addr4(ip);
+    return optptr;
 }
 
 /******************************************************************************
@@ -201,6 +255,10 @@ void *dhcps_option_info(dhcps_t *dhcps, u8_t op_id, u32_t opt_len)
             if (opt_len == sizeof(dhcps->dhcps_mask)) {
                 option_arg = &dhcps->dhcps_mask;
             }
+
+            break;
+        case CAPTIVEPORTAL_URI:
+            option_arg = &dhcps->dhcps_captiveportal_uri;
 
             break;
         default:
@@ -256,6 +314,11 @@ err_t dhcps_set_option_info(dhcps_t *dhcps, u8_t op_id, void *opt_info, u32_t op
                 dhcps->dhcps_mask = *(ip4_addr_t *)opt_info;
             }
 
+            break;
+
+        case CAPTIVEPORTAL_URI:
+            dhcps->dhcps_captiveportal_uri = (char *)opt_info;
+            break;
 
         default:
             break;
@@ -364,16 +427,14 @@ static u8_t *add_msg_type(u8_t *optptr, u8_t type)
 *******************************************************************************/
 static u8_t *add_offer_options(dhcps_t *dhcps, u8_t *optptr)
 {
+    u32_t i;
     ip4_addr_t ipadd;
 
     ipadd.addr = *((u32_t *) &dhcps->server_address);
 
     *optptr++ = DHCP_OPTION_SUBNET_MASK;
     *optptr++ = 4;
-    *optptr++ = ip4_addr1(&dhcps->dhcps_mask);
-    *optptr++ = ip4_addr2(&dhcps->dhcps_mask);
-    *optptr++ = ip4_addr3(&dhcps->dhcps_mask);
-    *optptr++ = ip4_addr4(&dhcps->dhcps_mask);
+    optptr = dhcps_option_ip(optptr, &dhcps->dhcps_mask);
 
     *optptr++ = DHCP_OPTION_LEASE_TIME;
     *optptr++ = 4;
@@ -384,10 +445,7 @@ static u8_t *add_offer_options(dhcps_t *dhcps, u8_t *optptr)
 
     *optptr++ = DHCP_OPTION_SERVER_ID;
     *optptr++ = 4;
-    *optptr++ = ip4_addr1(&ipadd);
-    *optptr++ = ip4_addr2(&ipadd);
-    *optptr++ = ip4_addr3(&ipadd);
-    *optptr++ = ip4_addr4(&ipadd);
+    optptr = dhcps_option_ip(optptr, &ipadd);
 
     if (dhcps_router_enabled(dhcps->dhcps_offer)) {
         ip_info_t if_ip = { 0 };
@@ -398,39 +456,52 @@ static u8_t *add_offer_options(dhcps_t *dhcps, u8_t *optptr)
         if (!ip4_addr_isany_val(*gw_ip)) {
             *optptr++ = DHCP_OPTION_ROUTER;
             *optptr++ = 4;
-            *optptr++ = ip4_addr1(gw_ip);
-            *optptr++ = ip4_addr2(gw_ip);
-            *optptr++ = ip4_addr3(gw_ip);
-            *optptr++ = ip4_addr4(gw_ip);
+            optptr = dhcps_option_ip(optptr, gw_ip);
         }
     }
 
-    *optptr++ = DHCP_OPTION_DNS_SERVER;
-    *optptr++ = 4;
+    // In order of preference
     if (dhcps_dns_enabled(dhcps->dhcps_dns)) {
-        *optptr++ = ip4_addr1(&dhcps->dns_server);
-        *optptr++ = ip4_addr2(&dhcps->dns_server);
-        *optptr++ = ip4_addr3(&dhcps->dns_server);
-        *optptr++ = ip4_addr4(&dhcps->dns_server);
-    }else {
-        *optptr++ = ip4_addr1(&ipadd);
-        *optptr++ = ip4_addr2(&ipadd);
-        *optptr++ = ip4_addr3(&ipadd);
-        *optptr++ = ip4_addr4(&ipadd);
+        uint8_t size = 4;
+
+        if (dhcps->dns_server[DNS_TYPE_BACKUP].addr) {
+            size += 4;
+        }
+
+        *optptr++ = DHCP_OPTION_DNS_SERVER;
+        *optptr++ = size;
+        optptr = dhcps_option_ip(optptr, &dhcps->dns_server[DNS_TYPE_MAIN]);
+
+        if (dhcps->dns_server[DNS_TYPE_BACKUP].addr) {
+            optptr = dhcps_option_ip(optptr, &dhcps->dns_server[DNS_TYPE_BACKUP]);
+        }
+#ifdef CONFIG_LWIP_DHCPS_ADD_DNS
+    } else {
+        *optptr++ = DHCP_OPTION_DNS_SERVER;
+        *optptr++ = 4;
+        optptr = dhcps_option_ip(optptr, &ipadd);
+#endif /* CONFIG_LWIP_DHCPS_ADD_DNS */
     }
 
     ip4_addr_t broadcast_addr = { .addr = (ipadd.addr & dhcps->dhcps_mask.addr) | ~dhcps->dhcps_mask.addr };
     *optptr++ = DHCP_OPTION_BROADCAST_ADDRESS;
     *optptr++ = 4;
-    *optptr++ = ip4_addr1(&broadcast_addr);
-    *optptr++ = ip4_addr2(&broadcast_addr);
-    *optptr++ = ip4_addr3(&broadcast_addr);
-    *optptr++ = ip4_addr4(&broadcast_addr);
+    optptr = dhcps_option_ip(optptr, &broadcast_addr);
 
     *optptr++ = DHCP_OPTION_INTERFACE_MTU;
     *optptr++ = 2;
     *optptr++ = 0x05;
     *optptr++ = 0xdc;
+
+    if (dhcps->dhcps_captiveportal_uri) {
+        size_t length = strlen(dhcps->dhcps_captiveportal_uri);
+
+        *optptr++ = DHCP_OPTION_CAPTIVEPORTAL_URI;
+        *optptr++ = length;
+        for (i = 0; i < length; i++) {
+            *optptr++ = dhcps->dhcps_captiveportal_uri[i];
+        }
+    }
 
     *optptr++ = DHCP_OPTION_PERFORM_ROUTER_DISCOVERY;
     *optptr++ = 1;
@@ -475,34 +546,66 @@ static void create_msg(dhcps_t *dhcps, struct dhcps_msg *m)
     client.addr = *((uint32_t *) &dhcps->client_address);
 
     m->op = DHCP_REPLY;
-
     m->htype = DHCP_HTYPE_ETHERNET;
-
     m->hlen = 6;
 
-    m->hops = 0;
-//        os_memcpy((char *) xid, (char *) m->xid, sizeof(m->xid));
-    m->secs = 0;
+#if !ETHARP_SUPPORT_STATIC_ENTRIES
+    /* If the DHCP server does not support sending unicast message to the client,
+     * need to set the 'flags' field to broadcast */
     m->flags = htons(BOOTP_BROADCAST);
+#endif
 
     memcpy((char *) m->yiaddr, (char *) &client.addr, sizeof(m->yiaddr));
-
-    memset((char *) m->ciaddr, 0, sizeof(m->ciaddr));
-
-    memset((char *) m->siaddr, 0, sizeof(m->siaddr));
-
-    memset((char *) m->giaddr, 0, sizeof(m->giaddr));
-
-    memset((char *) m->sname, 0, sizeof(m->sname));
-
-    memset((char *) m->file, 0, sizeof(m->file));
-
-    memset((char *) m->options, 0, sizeof(m->options));
-
-    u32_t magic_cookie_temp = magic_cookie;
-
-    memcpy((char *) m->options, &magic_cookie_temp, sizeof(magic_cookie_temp));
+    memcpy((char *) m->options, &magic_cookie, sizeof(magic_cookie));
 }
+
+/******************************************************************************
+ * FunctionName : dhcps_response_ip_set
+ * Description  : set the ip address for sending to the DHCP client
+ * Parameters   : m -- DHCP message info
+ *                ip4_out -- ip address for sending
+ * Returns      : none
+*******************************************************************************/
+static void dhcps_response_ip_set(dhcps_t *dhcps, struct dhcps_msg *m, ip4_addr_t *ip4_out)
+{
+#if ETHARP_SUPPORT_STATIC_ENTRIES
+    ip4_addr_t ip4_giaddr;
+    ip4_addr_t ip4_ciaddr;
+    ip4_addr_t ip4_yiaddr;
+
+    struct eth_addr chaddr;
+    memcpy(chaddr.addr, m->chaddr, sizeof(chaddr.addr));
+    memcpy((char *)&ip4_giaddr.addr, (char *)m->giaddr, sizeof(m->giaddr));
+    memcpy((char *)&ip4_ciaddr.addr, (char *)m->ciaddr, sizeof(m->ciaddr));
+    memcpy((char *)&ip4_yiaddr.addr, (char *)m->yiaddr, sizeof(m->yiaddr));
+
+    if (!ip4_addr_isany_val(ip4_giaddr)) {
+        /* If the 'giaddr' field is non-zero, send return message to the address in 'giaddr'. (RFC 2131)*/
+        ip4_addr_set(ip4_out, &ip4_giaddr);
+        /* add the IP<->MAC as static entry into the arp table. */
+        etharp_add_static_entry(&ip4_giaddr, &chaddr);
+    } else {
+        if (!ip4_addr_isany_val(ip4_ciaddr)) {
+            /* If the 'giaddr' field is zero and the 'ciaddr' is nonzero,
+             * the server unicasts DHCPOFFER and DHCPACK message to the address in 'ciaddr'*/
+            ip4_addr_set(ip4_out, &ip4_ciaddr);
+            etharp_add_static_entry(&ip4_ciaddr, &chaddr);
+        } else if (!BROADCAST_BIT_IS_SET(htons(m->flags))) {
+            /* If the 'giaddr' is zero and 'ciaddr' is zero, and the broadcast bit is not set,
+             * the server unicasts DHCPOFFER and DHCPACK message to the client's hardware address and
+             * 'yiaddr' address. */
+            ip4_addr_set(ip4_out, &ip4_yiaddr);
+            etharp_add_static_entry(&ip4_yiaddr, &chaddr);
+        } else {
+            /* The server broadcast DHCPOFFER and DHCPACK message to 0xffffffff*/
+            ip4_addr_set(ip4_out, &dhcps->broadcast_dhcps);
+        }
+    }
+#else
+    ip4_addr_set(ip4_out, &dhcps->broadcast_dhcps);
+#endif
+}
+
 
 struct pbuf * dhcps_pbuf_alloc(u16_t len)
 {
@@ -538,6 +641,7 @@ static void send_offer(dhcps_t *dhcps, struct dhcps_msg *m, u16_t len)
 
     end = add_msg_type(&m->options[4], DHCPOFFER);
     end = add_offer_options(dhcps, end);
+    LWIP_HOOK_DHCPS_POST_APPEND_OPTS(dhcps->dhcps_netif, dhcps, DHCPOFFER, &end)
     end = add_end(end);
 
     p = dhcps_pbuf_alloc(len);
@@ -580,12 +684,17 @@ static void send_offer(dhcps_t *dhcps, struct dhcps_msg *m, u16_t len)
     }
 
     ip_addr_t ip_temp = IPADDR4_INIT(0x0);
-    ip4_addr_set(ip_2_ip4(&ip_temp), &dhcps->broadcast_dhcps);
+    dhcps_response_ip_set(dhcps, m, ip_2_ip4(&ip_temp));
 #if DHCPS_DEBUG
-    SendOffer_err_t = udp_sendto(pcb_dhcps, p, &ip_temp, DHCPS_CLIENT_PORT);
+    SendOffer_err_t = udp_sendto(dhcps->dhcps_pcb, p, &ip_temp, DHCPS_CLIENT_PORT);
     DHCPS_LOG("dhcps: send_offer>>udp_sendto result %x\n", SendOffer_err_t);
 #else
     udp_sendto(dhcps->dhcps_pcb, p, &ip_temp, DHCPS_CLIENT_PORT);
+#endif
+
+#if ETHARP_SUPPORT_STATIC_ENTRIES
+    /* remove the IP<->MAC from the arp table. */
+    etharp_remove_static_entry(ip_2_ip4(&ip_temp));
 #endif
 
     if (p->ref != 0) {
@@ -615,6 +724,7 @@ static void send_nak(dhcps_t *dhcps, struct dhcps_msg *m, u16_t len)
     create_msg(dhcps, m);
 
     end = add_msg_type(&m->options[4], DHCPNAK);
+    LWIP_HOOK_DHCPS_POST_APPEND_OPTS(dhcps->dhcps_netif, dhcps, DHCPNAK, &end)
     end = add_end(end);
 
     p = dhcps_pbuf_alloc(len);
@@ -657,12 +767,35 @@ static void send_nak(dhcps_t *dhcps, struct dhcps_msg *m, u16_t len)
     }
 
     ip_addr_t ip_temp = IPADDR4_INIT(0x0);
+
+#if ETHARP_SUPPORT_STATIC_ENTRIES
+    ip4_addr_t ip4_giaddr;
+    struct eth_addr chaddr;
+    memcpy(chaddr.addr, m->chaddr, sizeof(chaddr.addr));
+    memcpy((char *)&ip4_giaddr.addr, (char *)m->giaddr, sizeof(m->giaddr));
+
+    if (!ip4_addr_isany_val(ip4_giaddr)) {
+        ip4_addr_set(ip_2_ip4(&ip_temp), &ip4_giaddr);
+        /* add the IP<->MAC as static entry into the arp table. */
+        etharp_add_static_entry(&ip4_giaddr, &chaddr);
+    } else {
+        /* when 'giaddr' is zero, the server broadcasts any DHCPNAK message to 0xffffffff. (RFC 2131)*/
+        ip4_addr_set(ip_2_ip4(&ip_temp), &dhcps->broadcast_dhcps);
+    }
+#else
     ip4_addr_set(ip_2_ip4(&ip_temp), &dhcps->broadcast_dhcps);
+#endif
+
 #if DHCPS_DEBUG
-    SendNak_err_t = udp_sendto(pcb_dhcps, p, &ip_temp, DHCPS_CLIENT_PORT);
+    SendNak_err_t = udp_sendto(dhcps->dhcps_pcb, p, &ip_temp, DHCPS_CLIENT_PORT);
     DHCPS_LOG("dhcps: send_nak>>udp_sendto result %x\n", SendNak_err_t);
 #else
     udp_sendto(dhcps->dhcps_pcb, p, &ip_temp, DHCPS_CLIENT_PORT);
+#endif
+
+#if ETHARP_SUPPORT_STATIC_ENTRIES
+    /* remove the IP<->MAC from the arp table. */
+    etharp_remove_static_entry(ip_2_ip4(&ip_temp));
 #endif
 
     if (p->ref != 0) {
@@ -691,6 +824,7 @@ static void send_ack(dhcps_t *dhcps, struct dhcps_msg *m, u16_t len)
 
     end = add_msg_type(&m->options[4], DHCPACK);
     end = add_offer_options(dhcps, end);
+    LWIP_HOOK_DHCPS_POST_APPEND_OPTS(dhcps->dhcps_netif, dhcps, DHCPACK, &end)
     end = add_end(end);
 
     p = dhcps_pbuf_alloc(len);
@@ -733,10 +867,15 @@ static void send_ack(dhcps_t *dhcps, struct dhcps_msg *m, u16_t len)
     }
 
     ip_addr_t ip_temp = IPADDR4_INIT(0x0);
-    ip4_addr_set(ip_2_ip4(&ip_temp), &dhcps->broadcast_dhcps);
+    dhcps_response_ip_set(dhcps, m, ip_2_ip4(&ip_temp));
     SendAck_err_t = udp_sendto(dhcps->dhcps_pcb, p, &ip_temp, DHCPS_CLIENT_PORT);
 #if DHCPS_DEBUG
     DHCPS_LOG("dhcps: send_ack>>udp_sendto result %x\n", SendAck_err_t);
+#endif
+
+#if ETHARP_SUPPORT_STATIC_ENTRIES
+    /* remove the IP<->MAC from the arp table. */
+    etharp_remove_static_entry(ip_2_ip4(&ip_temp));
 #endif
 
     if (SendAck_err_t == ERR_OK) {
@@ -902,7 +1041,7 @@ static s16_t parse_msg(dhcps_t *dhcps, struct dhcps_msg *m, u16_t len)
                     dhcps->client_address.addr = dhcps->client_address_plus.addr;
                 }
 
-                if (flag == false) { // search the fisrt unused ip
+                if (flag == false) { // search the first unused ip
                     if (first_address.addr < pdhcps_pool->ip.addr) {
                         flag = true;
                     } else {
@@ -981,7 +1120,7 @@ POOL_CHECK:
 
 #if DHCPS_DEBUG
         DHCPS_LOG("dhcps: xid changed\n");
-        DHCPS_LOG("dhcps: client_address.addr = %x\n", client_address.addr);
+        DHCPS_LOG("dhcps: client_address.addr = %x\n", dhcps->client_address.addr);
 #endif
         return ret;
     }
@@ -1130,45 +1269,52 @@ static void handle_dhcp(void *arg,
 *******************************************************************************/
 static void dhcps_poll_set(dhcps_t *dhcps, u32_t ip)
 {
-    u32_t softap_ip = 0, local_ip = 0;
+    u32_t server_ip = 0;
     u32_t start_ip = 0;
     u32_t end_ip = 0;
+    u32_t range_start_ip = 0;
+    u32_t range_end_ip = 0;
     dhcps_lease_t *dhcps_poll = &dhcps->dhcps_poll;
     if (dhcps_poll->enable == true) {
-        softap_ip = htonl(ip);
+        server_ip = htonl(ip);
         start_ip = htonl(dhcps_poll->start_ip.addr);
         end_ip = htonl(dhcps_poll->end_ip.addr);
 
         /*config ip information can't contain local ip*/
-        if ((start_ip <= softap_ip) && (softap_ip <= end_ip)) {
+        if ((server_ip >= start_ip) && (server_ip <= end_ip)) {
             dhcps_poll->enable = false;
         } else {
             /*config ip information must be in the same segment as the local ip*/
-            softap_ip >>= 8;
 
-            if (((start_ip >> 8 != softap_ip) || (end_ip >> 8 != softap_ip))
-                    || (end_ip - start_ip > DHCPS_MAX_LEASE)) {
+            if (!ip4_addr_netcmp(&dhcps_poll->start_ip, &dhcps->server_address, &dhcps->dhcps_mask)
+                  || !ip4_addr_netcmp(&dhcps_poll->end_ip, &dhcps->server_address, &dhcps->dhcps_mask)
+                  || (end_ip - start_ip + 1 > DHCPS_MAX_LEASE)) {
                 dhcps_poll->enable = false;
             }
         }
     }
 
     if (dhcps_poll->enable == false) {
-        local_ip = softap_ip = htonl(ip);
-        softap_ip &= 0xFFFFFF00;
-        local_ip &= 0xFF;
+        server_ip = htonl(ip);
+        range_start_ip = server_ip & htonl(dhcps->dhcps_mask.addr);
+        range_end_ip = range_start_ip | ~htonl(dhcps->dhcps_mask.addr);
 
-        if (local_ip >= 0x80) {
-            local_ip -= DHCPS_MAX_LEASE;
+        if (server_ip - range_start_ip > range_end_ip - server_ip) {
+            range_start_ip = range_start_ip + 1;
+            range_end_ip = server_ip - 1;
         } else {
-            local_ip ++;
+            range_start_ip = server_ip + 1;
+            range_end_ip = range_end_ip - 1;
         }
-
+        if (range_end_ip - range_start_ip + 1 > DHCPS_MAX_LEASE) {
+            range_end_ip = range_start_ip + DHCPS_MAX_LEASE - 1;
+        }
         bzero(dhcps_poll, sizeof(*dhcps_poll));
-        dhcps_poll->start_ip.addr = softap_ip | local_ip;
-        dhcps_poll->end_ip.addr = softap_ip | (local_ip + DHCPS_MAX_LEASE - 1);
+        dhcps_poll->start_ip.addr = range_start_ip;
+        dhcps_poll->end_ip.addr = range_end_ip;
         dhcps_poll->start_ip.addr = htonl(dhcps_poll->start_ip.addr);
         dhcps_poll->end_ip.addr = htonl(dhcps_poll->end_ip.addr);
+        dhcps_poll->enable = true;
     }
 
 }
@@ -1211,17 +1357,20 @@ err_t dhcps_start(dhcps_t *dhcps, struct netif *netif, ip4_addr_t ip)
     dhcps->dhcps_pcb = udp_new();
 
     if (dhcps->dhcps_pcb == NULL || ip4_addr_isany_val(ip)) {
-        printf("dhcps_start(): could not obtain pcb\n");
+        DHCPS_LOG("dhcps_start(): could not obtain pcb\n");
         return ERR_ARG;
     }
 
     IP4_ADDR(&dhcps->broadcast_dhcps, 255, 255, 255, 255);
 
     dhcps->server_address.addr = ip.addr;
+    DHCP_CHECK_SUBNET_MASK_IP(htonl(dhcps->dhcps_mask.addr));
+    DHCP_CHECK_IP_MATCH_SUBNET_MASK(htonl(dhcps->dhcps_mask.addr), htonl(ip.addr));
     dhcps_poll_set(dhcps, dhcps->server_address.addr);
 
     dhcps->client_address_plus.addr = dhcps->dhcps_poll.start_ip.addr;
 
+    udp_bind_netif(dhcps->dhcps_pcb, dhcps->dhcps_netif);
     udp_bind(dhcps->dhcps_pcb, &netif->ip_addr, DHCPS_SERVER_PORT);
     udp_recv(dhcps->dhcps_pcb, handle_dhcp, dhcps);
 #if DHCPS_DEBUG
@@ -1286,7 +1435,7 @@ static void kill_oldest_dhcps_pool(dhcps_t *dhcps)
     assert(pre != NULL && pre->pnext != NULL); // Expect the list to have at least 2 nodes
     p = pre->pnext;
     minpre = pre;
-    minp = p;
+    minp = pre;
 
     while (p != NULL) {
         pdhcps_pool = p->pnode;
@@ -1300,8 +1449,11 @@ static void kill_oldest_dhcps_pool(dhcps_t *dhcps)
         pre = p;
         p = p->pnext;
     }
-
-    minpre->pnext = minp->pnext;
+    if (minp == dhcps->plist) {
+        dhcps->plist = minp->pnext;
+    } else {
+        minpre->pnext = minp->pnext;
+    }
     free(minp->pnode);
     minp->pnode = NULL;
     free(minp);
@@ -1387,36 +1539,71 @@ bool dhcp_search_ip_on_mac(dhcps_t *dhcps, u8_t *mac, ip4_addr_t *ip)
 }
 
 /******************************************************************************
- * FunctionName : dhcps_dns_setserver
- * Description  : set DNS server address for dhcpserver
+ * FunctionName : dhcps_dns_setserver_by_type
+ * Description  : Set the DNS server address for dhcpserver with a specific type
  * Parameters   : dnsserver -- The DNS server address
- * Returns      : ERR_ARG if invalid handle, ERR_OK on success
+ *                type      -- The DNS type
+ * Returns      : ERR_ARG if invalid handle, ERR_VAL if invalid type, ERR_OK on success
 *******************************************************************************/
-err_t dhcps_dns_setserver(dhcps_t *dhcps, const ip_addr_t *dnsserver)
+err_t dhcps_dns_setserver_by_type(dhcps_t *dhcps, const ip_addr_t *dnsserver, dns_type_t type)
 {
     if (dhcps == NULL) {
         return ERR_ARG;
     }
+
+    if (type >= DNS_TYPE_MAX) {
+        return ERR_VAL;
+    }
+
     if (dnsserver != NULL) {
-        dhcps->dns_server = *(ip_2_ip4(dnsserver));
+        dhcps->dns_server[type] = *(ip_2_ip4(dnsserver));
     } else {
-        dhcps->dns_server = *(ip_2_ip4(IP_ADDR_ANY));
+        dhcps->dns_server[type] = *(ip_2_ip4(IP_ADDR_ANY));
     }
     return ERR_OK;
 }
 
 /******************************************************************************
- * FunctionName : dhcps_dns_getserver
- * Description  : get DNS server address for dhcpserver
- * Parameters   : none
- * Returns      : ip4_addr_t
+ * FunctionName : dhcps_dns_setserver
+ * Description  : Set the main DNS server address for dhcpserver
+ * Parameters   : dnsserver -- The DNS server address
+ * Returns      : ERR_ARG if invalid handle, ERR_VAL if invalid type, ERR_OK on success
+*******************************************************************************/
+err_t dhcps_dns_setserver(dhcps_t *dhcps, const ip_addr_t *dnsserver)
+{
+    return dhcps_dns_setserver_by_type(dhcps, dnsserver, DNS_TYPE_MAIN);
+}
+
+/******************************************************************************
+ * FunctionName : dhcps_dns_getserver_by_type
+ * Description  : Get the DNS server address for dhcpserver
+ * Parameters   : dnsserver -- The DNS server address
+ *                type      -- The DNS type
+ * Returns      : ERR_ARG if invalid handle, ERR_VAL if invalid type, ERR_OK on success
+*******************************************************************************/
+err_t dhcps_dns_getserver_by_type(dhcps_t *dhcps, ip4_addr_t *dnsserver, dns_type_t type)
+{
+    if ((dhcps == NULL) || (dnsserver == NULL)) {
+        return ERR_ARG;
+    }
+
+    if (type >= DNS_TYPE_MAX) {
+        return ERR_VAL;
+    }
+
+    *dnsserver = dhcps->dns_server[type];
+    return ERR_OK;
+}
+
+/******************************************************************************
+ * FunctionName : dhcps_dns_getserver_by_type
+ * Description  : Get the main DNS server address for dhcpserver
+ * Parameters   : dnsserver -- The DNS server address
+ * Returns      : ERR_ARG if invalid handle, ERR_VAL if invalid type, ERR_OK on success
 *******************************************************************************/
 err_t dhcps_dns_getserver(dhcps_t *dhcps, ip4_addr_t *dnsserver)
 {
-    if (dhcps) {
-        *dnsserver = dhcps->dns_server;
-        return ERR_OK;
-    }
-    return ERR_ARG;
+    return dhcps_dns_getserver_by_type(dhcps, dnsserver, DNS_TYPE_MAIN);
 }
-#endif // ESP_DHCP
+
+#endif // ESP_DHCPS

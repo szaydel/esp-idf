@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020-2021 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2020-2023 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -15,27 +15,47 @@ extern "C" {
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "soc/timer_periph.h"
+#include "soc/wdt_periph.h"
 #include "soc/timer_group_struct.h"
 #include "hal/wdt_types.h"
 #include "hal/assert.h"
 #include "esp_attr.h"
+#include "esp_assert.h"
 #include "hal/misc.h"
 
+/* Pre-calculated prescaler to achieve 500 ticks/us (MWDT1_TICKS_PER_US) when using default clock (MWDT_CLK_SRC_DEFAULT ) */
+#define MWDT_LL_DEFAULT_CLK_PRESCALER 20000
+
+/* Possible values for TIMG_WDT_STGx */
+#define TIMG_WDT_STG_SEL_OFF 0
+#define TIMG_WDT_STG_SEL_INT 1
+#define TIMG_WDT_STG_SEL_RESET_CPU 2
+#define TIMG_WDT_STG_SEL_RESET_SYSTEM 3
+
+/* Possible values for TIMG_WDT_CPU_RESET_LENGTH and TIMG_WDT_SYS_RESET_LENGTH */
+#define TIMG_WDT_RESET_LENGTH_100_NS    0
+#define TIMG_WDT_RESET_LENGTH_200_NS    1
+#define TIMG_WDT_RESET_LENGTH_300_NS    2
+#define TIMG_WDT_RESET_LENGTH_400_NS    3
+#define TIMG_WDT_RESET_LENGTH_500_NS    4
+#define TIMG_WDT_RESET_LENGTH_800_NS    5
+#define TIMG_WDT_RESET_LENGTH_1600_NS   6
+#define TIMG_WDT_RESET_LENGTH_3200_NS   7
+
 //Type check wdt_stage_action_t
-_Static_assert(WDT_STAGE_ACTION_OFF == TIMG_WDT_STG_SEL_OFF, "Add mapping to LL watchdog timeout behavior, since it's no longer naturally compatible with wdt_stage_action_t");
-_Static_assert(WDT_STAGE_ACTION_INT == TIMG_WDT_STG_SEL_INT, "Add mapping to LL watchdog timeout behavior, since it's no longer naturally compatible with wdt_stage_action_t");
-_Static_assert(WDT_STAGE_ACTION_RESET_CPU == TIMG_WDT_STG_SEL_RESET_CPU, "Add mapping to LL watchdog timeout behavior, since it's no longer naturally compatible with wdt_stage_action_t");
-_Static_assert(WDT_STAGE_ACTION_RESET_SYSTEM == TIMG_WDT_STG_SEL_RESET_SYSTEM, "Add mapping to LL watchdog timeout behavior, since it's no longer naturally compatible with wdt_stage_action_t");
+ESP_STATIC_ASSERT(WDT_STAGE_ACTION_OFF == TIMG_WDT_STG_SEL_OFF, "Add mapping to LL watchdog timeout behavior, since it's no longer naturally compatible with wdt_stage_action_t");
+ESP_STATIC_ASSERT(WDT_STAGE_ACTION_INT == TIMG_WDT_STG_SEL_INT, "Add mapping to LL watchdog timeout behavior, since it's no longer naturally compatible with wdt_stage_action_t");
+ESP_STATIC_ASSERT(WDT_STAGE_ACTION_RESET_CPU == TIMG_WDT_STG_SEL_RESET_CPU, "Add mapping to LL watchdog timeout behavior, since it's no longer naturally compatible with wdt_stage_action_t");
+ESP_STATIC_ASSERT(WDT_STAGE_ACTION_RESET_SYSTEM == TIMG_WDT_STG_SEL_RESET_SYSTEM, "Add mapping to LL watchdog timeout behavior, since it's no longer naturally compatible with wdt_stage_action_t");
 //Type check wdt_reset_sig_length_t
-_Static_assert(WDT_RESET_SIG_LENGTH_100ns == TIMG_WDT_RESET_LENGTH_100_NS, "Add mapping to LL watchdog timeout behavior, since it's no longer naturally compatible with wdt_reset_sig_length_t");
-_Static_assert(WDT_RESET_SIG_LENGTH_200ns == TIMG_WDT_RESET_LENGTH_200_NS, "Add mapping to LL watchdog timeout behavior, since it's no longer naturally compatible with wdt_reset_sig_length_t");
-_Static_assert(WDT_RESET_SIG_LENGTH_300ns == TIMG_WDT_RESET_LENGTH_300_NS, "Add mapping to LL watchdog timeout behavior, since it's no longer naturally compatible with wdt_reset_sig_length_t");
-_Static_assert(WDT_RESET_SIG_LENGTH_400ns == TIMG_WDT_RESET_LENGTH_400_NS, "Add mapping to LL watchdog timeout behavior, since it's no longer naturally compatible with wdt_reset_sig_length_t");
-_Static_assert(WDT_RESET_SIG_LENGTH_500ns == TIMG_WDT_RESET_LENGTH_500_NS, "Add mapping to LL watchdog timeout behavior, since it's no longer naturally compatible with wdt_reset_sig_length_t");
-_Static_assert(WDT_RESET_SIG_LENGTH_800ns == TIMG_WDT_RESET_LENGTH_800_NS, "Add mapping to LL watchdog timeout behavior, since it's no longer naturally compatible with wdt_reset_sig_length_t");
-_Static_assert(WDT_RESET_SIG_LENGTH_1_6us == TIMG_WDT_RESET_LENGTH_1600_NS, "Add mapping to LL watchdog timeout behavior, since it's no longer naturally compatible with wdt_reset_sig_length_t");
-_Static_assert(WDT_RESET_SIG_LENGTH_3_2us == TIMG_WDT_RESET_LENGTH_3200_NS, "Add mapping to LL watchdog timeout behavior, since it's no longer naturally compatible with wdt_reset_sig_length_t");
+ESP_STATIC_ASSERT(WDT_RESET_SIG_LENGTH_100ns == TIMG_WDT_RESET_LENGTH_100_NS, "Add mapping to LL watchdog timeout behavior, since it's no longer naturally compatible with wdt_reset_sig_length_t");
+ESP_STATIC_ASSERT(WDT_RESET_SIG_LENGTH_200ns == TIMG_WDT_RESET_LENGTH_200_NS, "Add mapping to LL watchdog timeout behavior, since it's no longer naturally compatible with wdt_reset_sig_length_t");
+ESP_STATIC_ASSERT(WDT_RESET_SIG_LENGTH_300ns == TIMG_WDT_RESET_LENGTH_300_NS, "Add mapping to LL watchdog timeout behavior, since it's no longer naturally compatible with wdt_reset_sig_length_t");
+ESP_STATIC_ASSERT(WDT_RESET_SIG_LENGTH_400ns == TIMG_WDT_RESET_LENGTH_400_NS, "Add mapping to LL watchdog timeout behavior, since it's no longer naturally compatible with wdt_reset_sig_length_t");
+ESP_STATIC_ASSERT(WDT_RESET_SIG_LENGTH_500ns == TIMG_WDT_RESET_LENGTH_500_NS, "Add mapping to LL watchdog timeout behavior, since it's no longer naturally compatible with wdt_reset_sig_length_t");
+ESP_STATIC_ASSERT(WDT_RESET_SIG_LENGTH_800ns == TIMG_WDT_RESET_LENGTH_800_NS, "Add mapping to LL watchdog timeout behavior, since it's no longer naturally compatible with wdt_reset_sig_length_t");
+ESP_STATIC_ASSERT(WDT_RESET_SIG_LENGTH_1_6us == TIMG_WDT_RESET_LENGTH_1600_NS, "Add mapping to LL watchdog timeout behavior, since it's no longer naturally compatible with wdt_reset_sig_length_t");
+ESP_STATIC_ASSERT(WDT_RESET_SIG_LENGTH_3_2us == TIMG_WDT_RESET_LENGTH_3200_NS, "Add mapping to LL watchdog timeout behavior, since it's no longer naturally compatible with wdt_reset_sig_length_t");
 
 /**
  * @brief Enable the MWDT
@@ -246,6 +266,39 @@ FORCE_INLINE_ATTR void mwdt_ll_clear_intr_status(timg_dev_t *hw)
 FORCE_INLINE_ATTR void mwdt_ll_set_intr_enable(timg_dev_t *hw, bool enable)
 {
     hw->int_ena_timers.wdt_int_ena = (enable) ? 1 : 0;
+}
+
+/**
+ * @brief Set the clock source for the MWDT.
+ *
+ * @param hw Beginning address of the peripheral registers.
+ * @param clk_src Clock source
+ */
+FORCE_INLINE_ATTR void mwdt_ll_set_clock_source(timg_dev_t *hw, mwdt_clock_source_t clk_src)
+{
+    switch (clk_src) {
+    case MWDT_CLK_SRC_APB:
+        hw->wdtconfig0.wdt_use_xtal = 0;
+        break;
+    case MWDT_CLK_SRC_XTAL:
+        hw->wdtconfig0.wdt_use_xtal = 1;
+        break;
+    default:
+        HAL_ASSERT(false);
+        break;
+    }
+}
+
+/**
+ * @brief Enable MWDT module clock
+ *
+ * @param hw Beginning address of the peripheral registers.
+ * @param en true to enable, false to disable
+ */
+__attribute__((always_inline))
+static inline void mwdt_ll_enable_clock(timg_dev_t *hw, bool en)
+{
+    hw->regclk.wdt_clk_is_active = en;
 }
 
 #ifdef __cplusplus

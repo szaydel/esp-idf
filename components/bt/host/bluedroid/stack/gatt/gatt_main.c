@@ -103,6 +103,7 @@ void gatt_init (void)
     memset (&gatt_cb, 0, sizeof(tGATT_CB));
     memset (&fixed_reg, 0, sizeof(tL2CAP_FIXED_CHNL_REG));
 
+    gatt_cb.auto_disc = TRUE;
     gatt_cb.p_clcb_list = list_new(osi_free_func);
     gatt_cb.p_tcb_list  = list_new(osi_free_func);
 #if defined(GATT_INITIAL_TRACE_LEVEL)
@@ -114,6 +115,8 @@ void gatt_init (void)
     gatt_cb.sign_op_queue = fixed_queue_new(QUEUE_SIZE_MAX);
     gatt_cb.srv_chg_clt_q = fixed_queue_new(QUEUE_SIZE_MAX);
     gatt_cb.pending_new_srv_start_q = fixed_queue_new(QUEUE_SIZE_MAX);
+    gatt_cb.srv_chg_mode = GATTS_SEND_SERVICE_CHANGE_MODE;
+
     /* First, register fixed L2CAP channel for ATT over BLE */
     fixed_reg.fixed_chnl_opts.mode         = L2CAP_FCR_BASIC_MODE;
     fixed_reg.fixed_chnl_opts.max_transmit = 0xFF;
@@ -191,9 +194,7 @@ void gatt_free(void)
 #endif /* #if (GATTS_INCLUDED == TRUE) */
     }
     list_free(gatt_cb.p_tcb_list);
-#if (GATTC_INCLUDED == TRUE)
     list_free(gatt_cb.p_clcb_list);
-#endif //(GATTC_INCLUDED == TRUE)
 
 #if (GATTS_INCLUDED == TRUE)
     for (int i = 0; i < GATT_MAX_SR_PROFILES; i++) {
@@ -501,7 +502,7 @@ static void gatt_le_connect_cback (UINT16 chan, BD_ADDR bd_addr, BOOLEAN connect
 #endif  ///GATTS_INCLUDED == TRUE
                 }
             } else {
-                GATT_TRACE_ERROR("CCB max out, no rsources");
+                GATT_TRACE_ERROR("CCB max out, no resources");
             }
         }
     } else {
@@ -928,18 +929,23 @@ static void gatt_send_conn_cback(tGATT_TCB *p_tcb)
 {
     UINT8               i;
     tGATT_REG           *p_reg;
+#if (tGATT_BG_CONN_DEV == TRUE)
     tGATT_BG_CONN_DEV   *p_bg_dev = NULL;
+#endif // #if (tGATT_BG_CONN_DEV == TRUE)
     UINT16              conn_id;
 
+#if (tGATT_BG_CONN_DEV == TRUE)
     p_bg_dev = gatt_find_bg_dev(p_tcb->peer_bda);
+#endif // #if (tGATT_BG_CONN_DEV == TRUE)
 
     /* notifying all applications for the connection up event */
     for (i = 0,  p_reg = gatt_cb.cl_rcb ; i < GATT_MAX_APPS; i++, p_reg++) {
         if (p_reg->in_use) {
+#if (tGATT_BG_CONN_DEV == TRUE)
             if (p_bg_dev && gatt_is_bg_dev_for_app(p_bg_dev, p_reg->gatt_if)) {
                 gatt_update_app_use_link_flag(p_reg->gatt_if, p_tcb, TRUE, TRUE);
             }
-
+#endif // #if (tGATT_BG_CONN_DEV == TRUE)
             if (p_reg->app_cb.p_conn_cb) {
                 conn_id = GATT_CREATE_CONN_ID(p_tcb->tcb_idx, p_reg->gatt_if);
                 (*p_reg->app_cb.p_conn_cb)(p_reg->gatt_if, p_tcb->peer_bda, conn_id,
@@ -1228,6 +1234,22 @@ uint16_t gatt_get_local_mtu(void)
 void gatt_set_local_mtu(uint16_t mtu)
 {
     gatt_default.local_mtu = mtu;
+}
+
+uint8_t gatt_tcb_active_count(void)
+{
+    tGATT_TCB   *p_tcb  = NULL;
+    list_node_t *p_node = NULL;
+    uint8_t count = 0;
+
+    for(p_node = list_begin(gatt_cb.p_tcb_list); p_node; p_node = list_next(p_node)) {
+        p_tcb = list_node(p_node);
+        if (p_tcb && p_tcb->in_use && (p_tcb->ch_state != GATT_CH_CLOSE)) {
+            count++;
+        }
+    }
+
+    return count;
 }
 
 #endif /* BLE_INCLUDED */

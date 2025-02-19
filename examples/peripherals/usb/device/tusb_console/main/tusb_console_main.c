@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2022 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2022-2024 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Unlicense OR CC0-1.0
  */
@@ -13,7 +13,6 @@
 #include <stdlib.h>
 #include <sys/reent.h>
 #include "esp_log.h"
-#include "esp_vfs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "tinyusb.h"
@@ -28,11 +27,23 @@ void app_main(void)
     /* Setting TinyUSB up */
     ESP_LOGI(TAG, "USB initialization");
 
-    tinyusb_config_t tusb_cfg = { 0 }; // the configuration uses default values
+    const tinyusb_config_t tusb_cfg = {
+        .device_descriptor = NULL,
+        .string_descriptor = NULL,
+        .external_phy = false, // In the most cases you need to use a `false` value
+#if (TUD_OPT_HIGH_SPEED)
+        .fs_configuration_descriptor = NULL,
+        .hs_configuration_descriptor = NULL,
+        .qualifier_descriptor = NULL,
+#else
+        .configuration_descriptor = NULL,
+#endif // TUD_OPT_HIGH_SPEED
+    };
+
     ESP_ERROR_CHECK(tinyusb_driver_install(&tusb_cfg));
 
-    tinyusb_config_cdcacm_t amc_cfg = { 0 }; // the configuration uses default values
-    ESP_ERROR_CHECK(tusb_cdc_acm_init(&amc_cfg));
+    tinyusb_config_cdcacm_t acm_cfg = { 0 }; // the configuration uses default values
+    ESP_ERROR_CHECK(tusb_cdc_acm_init(&acm_cfg));
 
     ESP_LOGI(TAG, "USB initialization DONE");
     while (1) {

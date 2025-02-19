@@ -71,6 +71,8 @@ int (*esp_crt_bundle_attach_fn)(void *conf);
 void eap_peer_config_deinit(struct eap_sm *sm);
 void eap_peer_blob_deinit(struct eap_sm *sm);
 void eap_deinit_prev_method(struct eap_sm *sm, const char *txt);
+static void eap_sm_request(struct eap_sm *sm, enum wpa_ctrl_req_type field,
+			   const char *msg, size_t msglen);
 
 #ifdef EAP_PEER_METHOD
 static struct eap_method *eap_methods = NULL;
@@ -314,6 +316,15 @@ int eap_peer_register_methods(void)
 	return ret;
 }
 
+static void eap_sm_free_key(struct eap_sm *sm)
+{
+	if (sm->eapKeyData) {
+		bin_clear_free(sm->eapKeyData, sm->eapKeyDataLen);
+		sm->eapKeyData = NULL;
+	}
+}
+
+
 void eap_deinit_prev_method(struct eap_sm *sm, const char *txt)
 {
 	if (sm->m == NULL || sm->eap_method_priv == NULL)
@@ -415,7 +426,7 @@ struct wpabuf * eap_sm_build_identity_resp(struct eap_sm *sm, u8 id, int encrypt
 	struct eap_peer_config *config = eap_get_config(sm);
 
 	if (config == NULL) {
-        wpa_printf(MSG_ERROR, "EAP: Build Identity Resp-> configuration was not available\n");
+        wpa_printf(MSG_ERROR, "EAP: Build Identity Resp-> configuration was not available");
 		return NULL;
 	}
 
@@ -432,7 +443,7 @@ struct wpabuf * eap_sm_build_identity_resp(struct eap_sm *sm, u8 id, int encrypt
 	}
 
 	if (identity == NULL) {
-        wpa_printf(MSG_ERROR, "EAP: Build Identity Resp-> identity was not available\n");
+        wpa_printf(MSG_ERROR, "EAP: Build Identity Resp-> identity was not available");
 		return NULL;
 	}
 
@@ -646,6 +657,7 @@ void eap_peer_config_deinit(struct eap_sm *sm)
 	os_free(sm->config.new_password);
 	os_free(sm->config.eap_methods);
 	os_bzero(&sm->config, sizeof(struct eap_peer_config));
+	config_methods = NULL;
 }
 
 int eap_peer_blob_init(struct eap_sm *sm)
@@ -661,7 +673,7 @@ int eap_peer_blob_init(struct eap_sm *sm)
 			ret = -2;
 			goto _out;
 		}
-		os_strncpy(sm->blob[0].name, CLIENT_CERT_NAME, BLOB_NAME_LEN+1);
+		os_strlcpy(sm->blob[0].name, CLIENT_CERT_NAME, BLOB_NAME_LEN+1);
 		sm->blob[0].len = g_wpa_client_cert_len;
 		sm->blob[0].data = g_wpa_client_cert;
 	}
@@ -672,7 +684,7 @@ int eap_peer_blob_init(struct eap_sm *sm)
 			ret = -2;
 			goto _out;
 		}
-		os_strncpy(sm->blob[1].name, PRIVATE_KEY_NAME, BLOB_NAME_LEN+1);
+		os_strlcpy(sm->blob[1].name, PRIVATE_KEY_NAME, BLOB_NAME_LEN+1);
 		sm->blob[1].len = g_wpa_private_key_len;
 		sm->blob[1].data = g_wpa_private_key;
 	}
@@ -683,7 +695,7 @@ int eap_peer_blob_init(struct eap_sm *sm)
 			ret = -2;
 			goto _out;
 		}
-		os_strncpy(sm->blob[2].name, CA_CERT_NAME, BLOB_NAME_LEN+1);
+		os_strlcpy(sm->blob[2].name, CA_CERT_NAME, BLOB_NAME_LEN+1);
 		sm->blob[2].len = g_wpa_ca_cert_len;
 		sm->blob[2].data = g_wpa_ca_cert;
 	}
@@ -694,7 +706,7 @@ int eap_peer_blob_init(struct eap_sm *sm)
 			ret = -2;
 			goto _out;
 		}
-		os_strncpy(sm->blob[3].name, "blob://", 8);
+		os_strlcpy(sm->blob[3].name, "blob://", 8);
 		sm->blob[3].len = g_wpa_pac_file_len;
 		sm->blob[3].data = g_wpa_pac_file;
 	}
@@ -712,10 +724,10 @@ _out:
 	return ret;
 }
 
-#if defined(CONFIG_CTRL_IFACE) || !defined(CONFIG_NO_STDOUT_DEBUG)
 static void eap_sm_request(struct eap_sm *sm, enum wpa_ctrl_req_type field,
 			   const char *msg, size_t msglen)
 {
+#if defined(CONFIG_CTRL_IFACE) || !defined(CONFIG_NO_STDOUT_DEBUG)
 	struct eap_peer_config *config;
 
 	if (sm == NULL)
@@ -740,14 +752,14 @@ static void eap_sm_request(struct eap_sm *sm, enum wpa_ctrl_req_type field,
 	case WPA_CTRL_REQ_EAP_PASSPHRASE:
 		config->pending_req_passphrase++;
 		break;
+	case WPA_CTRL_REQ_EXT_CERT_CHECK:
+		break;
 	default:
 		return;
 	}
 
-}
-#else /* CONFIG_CTRL_IFACE || !CONFIG_NO_STDOUT_DEBUG */
-#define eap_sm_request(sm, type, msg, msglen) do { } while (0)
 #endif /* CONFIG_CTRL_IFACE || !CONFIG_NO_STDOUT_DEBUG */
+}
 
 const char * eap_sm_get_method_name(struct eap_sm *sm)
 {
@@ -823,6 +835,7 @@ void eap_sm_abort(struct eap_sm *sm)
 {
 	wpabuf_free(sm->lastRespData);
 	sm->lastRespData = NULL;
+	eap_sm_free_key(sm);
 }
 
 /**

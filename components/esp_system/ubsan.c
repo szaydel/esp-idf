@@ -32,8 +32,7 @@
 #include <string.h>
 #include "esp_system.h"
 #include "esp_rom_sys.h"
-#include "hal/cpu_hal.h"
-
+#include "esp_cpu.h"
 
 struct source_location {
     const char *file_name;
@@ -110,7 +109,6 @@ struct invalid_builtin_data {
     unsigned char kind;
 };
 
-
 static void __ubsan_default_handler(struct source_location *loc, const char *func) __attribute__((noreturn));
 
 /*
@@ -138,8 +136,8 @@ void __ubsan_handle_invalid_builtin(void *data_);
 
 static void __ubsan_maybe_debugbreak(void)
 {
-    if (cpu_hal_is_debugger_attached()) {
-        cpu_hal_break();
+    if (esp_cpu_dbgr_is_attached()) {
+        esp_cpu_dbgr_break();
     }
 }
 

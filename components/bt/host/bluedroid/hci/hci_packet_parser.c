@@ -186,7 +186,9 @@ static void parse_ble_read_resolving_list_size_response(
 {
 
     uint8_t *stream = read_command_complete_header(response, HCI_BLE_READ_RESOLVING_LIST_SIZE, 1 /* bytes after */);
-    STREAM_TO_UINT8(*resolving_list_size_ptr, stream);
+    if (stream) {
+        STREAM_TO_UINT8(*resolving_list_size_ptr, stream);
+    }
 
     osi_free(response);
 }
@@ -198,22 +200,29 @@ static void parse_ble_read_suggested_default_data_length_response(
 {
 
     uint8_t *stream = read_command_complete_header(response, HCI_BLE_READ_DEFAULT_DATA_LENGTH, 2 /* bytes after */);
-    STREAM_TO_UINT16(*ble_default_packet_length_ptr, stream);
-    STREAM_TO_UINT16(*ble_default_packet_txtime_ptr, stream);
+    if (stream) {
+        STREAM_TO_UINT16(*ble_default_packet_length_ptr, stream);
+        STREAM_TO_UINT16(*ble_default_packet_txtime_ptr, stream);
+    }
+
     osi_free(response);
 }
+
 #if (BLE_50_FEATURE_SUPPORT == TRUE)
+#if (BLE_50_EXTEND_ADV_EN == TRUE)
 static void parse_ble_read_adv_max_len_response(
     BT_HDR *response,
     uint16_t *adv_max_len_ptr)
 {
 
     uint8_t *stream = read_command_complete_header(response, HCI_BLE_RD_MAX_ADV_DATA_LEN, 1 /* bytes after */);
-    // Size: 2 Octets ; Value: 0x001F – 0x0672 ; Maximum supported advertising data length
-    STREAM_TO_UINT16(*adv_max_len_ptr, stream);
-
+    if (stream) {
+        // Size: 2 Octets ; Value: 0x001F – 0x0672 ; Maximum supported advertising data length
+        STREAM_TO_UINT16(*adv_max_len_ptr, stream);
+    }
     osi_free(response);
 }
+#endif // #if (BLE_50_EXTEND_ADV_EN == TRUE)
 #endif // #if (BLE_50_FEATURE_SUPPORT == TRUE)
 
 
@@ -254,6 +263,7 @@ static uint8_t *read_command_complete_header(
     STREAM_TO_UINT8(status, stream);
 
     if (status != HCI_SUCCESS) {
+        HCI_TRACE_ERROR("%s failed: opcode 0x%04x, status 0x%02x", __func__, opcode, status);
         return NULL;
     }
 
@@ -274,7 +284,9 @@ static const hci_packet_parser_t interface = {
     parse_ble_read_local_supported_features_response,
     parse_ble_read_resolving_list_size_response,
 #if (BLE_50_FEATURE_SUPPORT == TRUE)
+#if (BLE_50_EXTEND_ADV_EN == TRUE)
     parse_ble_read_adv_max_len_response,
+#endif // #if (BLE_50_EXTEND_ADV_EN == TRUE)
 #endif // #if (BLE_50_FEATURE_SUPPORT == TRUE)
     parse_ble_read_suggested_default_data_length_response
 };

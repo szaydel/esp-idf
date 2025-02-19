@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2015-2022 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2015-2024 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -34,7 +34,7 @@
 
 #if BTC_AV_INCLUDED
 
-// global variable to inidcate avrc is initialized with a2dp
+// global variable to indicate avrc is initialized with a2dp
 bool g_av_with_rc;
 // global variable to indicate a2dp is initialized
 bool g_a2dp_on_init;
@@ -127,6 +127,8 @@ static btc_av_cb_t *btc_av_cb_ptr = NULL;
     case BTA_AV_META_MSG_EVT: \
     case BTA_AV_RC_FEAT_EVT: \
     case BTA_AV_REMOTE_RSP_EVT: \
+    case BTA_AV_CA_STATUS_EVT: \
+    case BTA_AV_CA_DATA_EVT: \
     { \
          btc_rc_handler(e, d);\
     }break; \
@@ -160,7 +162,7 @@ static const btc_sm_handler_t btc_av_state_handlers[] = {
     btc_av_state_closing_handler
 };
 
-static void btc_av_event_free_data(btc_sm_event_t event, void *p_data);
+static void btc_av_event_free_data(btc_msg_t *msg);
 
 /*************************************************************************
 ** Extern functions
@@ -219,7 +221,6 @@ UNUSED_ATTR static const char *dump_av_sm_event_name(btc_av_sm_event_t event)
         CASE_RETURN_STR(BTC_AV_CONNECT_REQ_EVT)
         CASE_RETURN_STR(BTC_AV_DISCONNECT_REQ_EVT)
         CASE_RETURN_STR(BTC_AV_START_STREAM_REQ_EVT)
-        CASE_RETURN_STR(BTC_AV_STOP_STREAM_REQ_EVT)
         CASE_RETURN_STR(BTC_AV_SUSPEND_STREAM_REQ_EVT)
         CASE_RETURN_STR(BTC_AV_SINK_CONFIG_REQ_EVT)
     default: return "UNKNOWN_EVENT";
@@ -383,6 +384,8 @@ static BOOLEAN btc_av_state_idle_handler(btc_sm_event_t event, void *p_data)
     case BTA_AV_META_MSG_EVT:
     case BTA_AV_RC_FEAT_EVT:
     case BTA_AV_REMOTE_RSP_EVT:
+    case BTA_AV_CA_STATUS_EVT:
+    case BTA_AV_CA_DATA_EVT:
         btc_rc_handler(event, (tBTA_AV *)p_data);
         break;
 
@@ -600,7 +603,6 @@ static BOOLEAN btc_av_state_closing_handler(btc_sm_event_t event, void *p_data)
         break;
 
     case BTA_AV_STOP_EVT:
-    case BTC_AV_STOP_STREAM_REQ_EVT:
 #if BTC_AV_SRC_INCLUDED
         if (btc_av_cb.peer_sep == AVDT_TSEP_SNK) {
             /* immediately flush any pending tx frames while suspend is pending */
@@ -712,7 +714,7 @@ static BOOLEAN btc_av_state_opened_handler(btc_sm_event_t event, void *p_data)
          */
         if (!(btc_av_cb.flags & BTC_AV_FLAG_PENDING_START)) {
             if (btc_av_cb.peer_sep == AVDT_TSEP_SNK) {
-                BTC_TRACE_DEBUG("%s: trigger suspend as remote initiated!!", __FUNCTION__);
+                BTC_TRACE_EVENT("%s: trigger suspend as remote initiated!!", __FUNCTION__);
                 btc_dispatch_sm_event(BTC_AV_SUSPEND_STREAM_REQ_EVT, NULL, 0);
             }
         }
@@ -882,8 +884,6 @@ static BOOLEAN btc_av_state_started_handler(btc_sm_event_t event, void *p_data)
 #endif /* BTC_AV_SRC_INCLUDED */
         break;
 
-    /* fixme -- use suspend = true always to work around issue with BTA AV */
-    case BTC_AV_STOP_STREAM_REQ_EVT:
     case BTC_AV_SUSPEND_STREAM_REQ_EVT:
 
         /* set pending flag to ensure btc task is not trying to restart
@@ -953,10 +953,8 @@ static BOOLEAN btc_av_state_started_handler(btc_sm_event_t event, void *p_data)
                 btc_av_cb.flags |= BTC_AV_FLAG_REMOTE_SUSPEND;
             }
 
-            btc_report_audio_state(ESP_A2D_AUDIO_STATE_REMOTE_SUSPEND, &(btc_av_cb.peer_bda));
-        } else {
-            btc_report_audio_state(ESP_A2D_AUDIO_STATE_STOPPED, &(btc_av_cb.peer_bda));
         }
+        btc_report_audio_state(ESP_A2D_AUDIO_STATE_SUSPEND, &(btc_av_cb.peer_bda));
 
         btc_sm_change_state(btc_av_cb.sm_handle, BTC_AV_STATE_OPENED);
 
@@ -969,7 +967,7 @@ static BOOLEAN btc_av_state_started_handler(btc_sm_event_t event, void *p_data)
         btc_av_cb.flags |= BTC_AV_FLAG_PENDING_STOP;
         btc_a2dp_on_stopped(&p_av->suspend);
 
-        btc_report_audio_state(ESP_A2D_AUDIO_STATE_STOPPED, &(btc_av_cb.peer_bda));
+        btc_report_audio_state(ESP_A2D_AUDIO_STATE_SUSPEND, &(btc_av_cb.peer_bda));
 
         /* if stop was successful, change state to open */
         if (p_av->suspend.status == BTA_AV_SUCCESS) {
@@ -1065,11 +1063,11 @@ void btc_av_event_deep_copy(btc_msg_t *msg, void *p_dest, void *p_src)
     }
 }
 
-static void btc_av_event_free_data(btc_sm_event_t event, void *p_data)
+static void btc_av_event_free_data(btc_msg_t *msg)
 {
-    switch (event) {
+    switch (msg->act) {
     case BTA_AV_META_MSG_EVT: {
-        tBTA_AV *av = (tBTA_AV *)p_data;
+        tBTA_AV *av = (tBTA_AV *)msg->arg;
         if (av->meta_msg.p_data) {
             osi_free(av->meta_msg.p_data);
         }
@@ -1269,7 +1267,7 @@ BOOLEAN btc_av_stream_ready(void)
               (int)btc_av_cb.sm_handle, state, btc_av_cb.flags);
 
     /* check if we are remotely suspended or stop is pending */
-    if (btc_av_cb.flags & (BTC_AV_FLAG_REMOTE_SUSPEND | BTC_AV_FLAG_PENDING_STOP)) {
+    if (btc_av_cb.flags & BTC_AV_FLAG_PENDING_STOP) {
         return FALSE;
     }
 
@@ -1294,7 +1292,7 @@ BOOLEAN btc_av_stream_started_ready(void)
               (int)btc_av_cb.sm_handle, state, btc_av_cb.flags);
 
     /* disallow media task to start if we have pending actions */
-    if (btc_av_cb.flags & (BTC_AV_FLAG_LOCAL_SUSPEND_PENDING | BTC_AV_FLAG_REMOTE_SUSPEND
+    if (btc_av_cb.flags & (BTC_AV_FLAG_LOCAL_SUSPEND_PENDING
                            | BTC_AV_FLAG_PENDING_STOP)) {
         return FALSE;
     }
@@ -1319,7 +1317,7 @@ void btc_dispatch_sm_event(btc_av_sm_event_t event, void *p_data, int len)
     msg.sig = BTC_SIG_API_CALL;
     msg.pid = BTC_PID_A2DP;
     msg.act = event;
-    btc_transfer_context(&msg, p_data, len, NULL);
+    btc_transfer_context(&msg, p_data, len, NULL, NULL);
 }
 
 static void bte_av_callback(tBTA_AV_EVT event, tBTA_AV *p_data)
@@ -1330,7 +1328,8 @@ static void bte_av_callback(tBTA_AV_EVT event, tBTA_AV *p_data)
     msg.sig = BTC_SIG_API_CB;
     msg.pid = BTC_PID_A2DP;
     msg.act = (uint8_t) event;
-    stat = btc_transfer_context(&msg, p_data, sizeof(tBTA_AV), btc_av_event_deep_copy);
+    stat = btc_transfer_context(&msg, p_data, sizeof(tBTA_AV),
+                                    btc_av_event_deep_copy, btc_av_event_free_data);
 
     if (stat) {
         BTC_TRACE_ERROR("%s transfer failed\n", __func__);
@@ -1360,7 +1359,7 @@ static void bte_av_media_callback(tBTA_AV_EVT event, tBTA_AV_MEDIA *p_data)
         /* send a command to BT Media Task */
         btc_a2dp_sink_reset_decoder((UINT8 *)p_data);
 
-        /* currently only supportes SBC */
+        /* currently only supports SBC */
         a2d_status = A2D_ParsSbcInfo(&sbc_cie, (UINT8 *)p_data, FALSE);
         if (a2d_status == A2D_SUCCESS) {
             btc_msg_t msg;
@@ -1373,7 +1372,7 @@ static void bte_av_media_callback(tBTA_AV_EVT event, tBTA_AV_MEDIA *p_data)
             memset(&arg, 0, sizeof(btc_av_args_t));
             arg.mcc.type = ESP_A2D_MCT_SBC;
             memcpy(arg.mcc.cie.sbc, (uint8_t *)p_data + 3, ESP_A2D_CIE_LEN_SBC);
-            btc_transfer_context(&msg, &arg, sizeof(btc_av_args_t), NULL);
+            btc_transfer_context(&msg, &arg, sizeof(btc_av_args_t), NULL, NULL);
         } else {
             BTC_TRACE_ERROR("ERROR dump_codec_info A2D_ParsSbcInfo fail:%d\n", a2d_status);
         }
@@ -1622,7 +1621,6 @@ void btc_a2dp_call_handler(btc_msg_t *msg)
         break;
     // case BTC_AV_DISCONNECT_REQ_EVT:
     case BTC_AV_START_STREAM_REQ_EVT:
-    case BTC_AV_STOP_STREAM_REQ_EVT:
     case BTC_AV_SUSPEND_STREAM_REQ_EVT: {
         btc_sm_dispatch(btc_av_cb.sm_handle, msg->act, NULL);
         break;
@@ -1635,7 +1633,7 @@ void btc_a2dp_call_handler(btc_msg_t *msg)
 void btc_a2dp_cb_handler(btc_msg_t *msg)
 {
     btc_sm_dispatch(btc_av_cb.sm_handle, msg->act, (void *)(msg->arg));
-    btc_av_event_free_data(msg->act, msg->arg);
+    btc_av_event_free_data(msg);
 }
 
 #if BTC_AV_SINK_INCLUDED

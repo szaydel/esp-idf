@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2021-2022 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2021-2024 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -8,127 +8,35 @@
 #include "esp_attr.h"
 #include "hal/emac_hal.h"
 #include "hal/emac_ll.h"
-#include "hal/gpio_ll.h"
+#if SOC_EMAC_IEEE1588V2_SUPPORTED
+#include "esp_rom_sys.h"
+#define EMAC_PTP_INIT_TIMEOUT_US (10)
+#endif // SOC_EMAC_IEEE1588V2_SUPPORTED
 
-#define ETH_CRC_LENGTH (4)
-
-void emac_hal_iomux_init_mii(void)
+static esp_err_t emac_hal_flush_trans_fifo(emac_hal_context_t *hal)
 {
-    /* TX_CLK to GPIO0 */
-    gpio_ll_iomux_func_sel(PERIPHS_IO_MUX_GPIO0_U, FUNC_GPIO0_EMAC_TX_CLK);
-    PIN_INPUT_ENABLE(GPIO_PIN_MUX_REG[0]);
-    /* TX_EN to GPIO21 */
-    gpio_ll_iomux_func_sel(PERIPHS_IO_MUX_GPIO21_U, FUNC_GPIO21_EMAC_TX_EN);
-    PIN_INPUT_DISABLE(GPIO_PIN_MUX_REG[21]);
-    /* TXD0 to GPIO19 */
-    gpio_ll_iomux_func_sel(PERIPHS_IO_MUX_GPIO19_U, FUNC_GPIO19_EMAC_TXD0);
-    PIN_INPUT_DISABLE(GPIO_PIN_MUX_REG[19]);
-    /* TXD1 to GPIO22 */
-    gpio_ll_iomux_func_sel(PERIPHS_IO_MUX_GPIO22_U, FUNC_GPIO22_EMAC_TXD1);
-    PIN_INPUT_DISABLE(GPIO_PIN_MUX_REG[22]);
-    /* TXD2 to MTMS */
-    gpio_ll_iomux_func_sel(PERIPHS_IO_MUX_MTMS_U, FUNC_MTMS_EMAC_TXD2);
-    PIN_INPUT_DISABLE(GPIO_PIN_MUX_REG[14]);
-    /* TXD3 to MTDI */
-    gpio_ll_iomux_func_sel(PERIPHS_IO_MUX_MTDI_U, FUNC_MTDI_EMAC_TXD3);
-    PIN_INPUT_DISABLE(GPIO_PIN_MUX_REG[12]);
-
-    /* RX_CLK to GPIO5 */
-    gpio_ll_iomux_func_sel(PERIPHS_IO_MUX_GPIO5_U, FUNC_GPIO5_EMAC_RX_CLK);
-    PIN_INPUT_ENABLE(GPIO_PIN_MUX_REG[5]);
-    /* RX_DV to GPIO27 */
-    gpio_ll_iomux_func_sel(PERIPHS_IO_MUX_GPIO27_U, FUNC_GPIO27_EMAC_RX_DV);
-    PIN_INPUT_ENABLE(GPIO_PIN_MUX_REG[27]);
-    /* RXD0 to GPIO25 */
-    gpio_ll_iomux_func_sel(PERIPHS_IO_MUX_GPIO25_U, FUNC_GPIO25_EMAC_RXD0);
-    PIN_INPUT_ENABLE(GPIO_PIN_MUX_REG[25]);
-    /* RXD1 to GPIO26 */
-    gpio_ll_iomux_func_sel(PERIPHS_IO_MUX_GPIO26_U, FUNC_GPIO26_EMAC_RXD1);
-    PIN_INPUT_ENABLE(GPIO_PIN_MUX_REG[26]);
-    /* RXD2 to U0TXD */
-    gpio_ll_iomux_func_sel(PERIPHS_IO_MUX_U0TXD_U, FUNC_U0TXD_EMAC_RXD2);
-    PIN_INPUT_ENABLE(GPIO_PIN_MUX_REG[1]);
-    /* RXD3 to MTDO */
-    gpio_ll_iomux_func_sel(PERIPHS_IO_MUX_MTDO_U, FUNC_MTDO_EMAC_RXD3);
-    PIN_INPUT_ENABLE(GPIO_PIN_MUX_REG[15]);
-}
-
-void emac_hal_iomux_rmii_clk_input(void)
-{
-    /* REF_CLK(RMII mode) to GPIO0 */
-    gpio_ll_iomux_func_sel(PERIPHS_IO_MUX_GPIO0_U, FUNC_GPIO0_EMAC_TX_CLK);
-    PIN_INPUT_ENABLE(GPIO_PIN_MUX_REG[0]);
-}
-
-void emac_hal_iomux_rmii_clk_ouput(int num)
-{
-    switch (num) {
-    case 0:
-        /* APLL clock output to GPIO0 (must be configured to 50MHz!) */
-        gpio_ll_iomux_func_sel(PERIPHS_IO_MUX_GPIO0_U, FUNC_GPIO0_CLK_OUT1);
-        PIN_INPUT_DISABLE(GPIO_PIN_MUX_REG[0]);
-        break;
-    case 16:
-        /* RMII CLK (50MHz) output to GPIO16 */
-        gpio_ll_iomux_func_sel(PERIPHS_IO_MUX_GPIO16_U, FUNC_GPIO16_EMAC_CLK_OUT);
-        PIN_INPUT_DISABLE(GPIO_PIN_MUX_REG[16]);
-        break;
-    case 17:
-        /* RMII CLK (50MHz) output to GPIO17 */
-        gpio_ll_iomux_func_sel(PERIPHS_IO_MUX_GPIO17_U, FUNC_GPIO17_EMAC_CLK_OUT_180);
-        PIN_INPUT_DISABLE(GPIO_PIN_MUX_REG[17]);
-        break;
-    default:
-        break;
+    emac_ll_flush_trans_fifo_enable(hal->dma_regs, true);
+    /* no other writes to the Operation Mode register until the flush tx fifo bit is cleared */
+    for (uint32_t i = 0; i < 1000; i++) {
+        if (emac_ll_get_flush_trans_fifo(hal->dma_regs) == 0) {
+            return ESP_OK;
+        }
     }
+    return ESP_ERR_TIMEOUT;
 }
 
-void emac_hal_iomux_init_rmii(void)
-{
-    /* TX_EN to GPIO21 */
-    gpio_ll_iomux_func_sel(PERIPHS_IO_MUX_GPIO21_U, FUNC_GPIO21_EMAC_TX_EN);
-    PIN_INPUT_DISABLE(GPIO_PIN_MUX_REG[21]);
-    /* TXD0 to GPIO19 */
-    gpio_ll_iomux_func_sel(PERIPHS_IO_MUX_GPIO19_U, FUNC_GPIO19_EMAC_TXD0);
-    PIN_INPUT_DISABLE(GPIO_PIN_MUX_REG[19]);
-    /* TXD1 to GPIO22 */
-    gpio_ll_iomux_func_sel(PERIPHS_IO_MUX_GPIO22_U, FUNC_GPIO22_EMAC_TXD1);
-    PIN_INPUT_DISABLE(GPIO_PIN_MUX_REG[22]);
-
-    /* CRS_DV to GPIO27 */
-    gpio_ll_iomux_func_sel(PERIPHS_IO_MUX_GPIO27_U, FUNC_GPIO27_EMAC_RX_DV);
-    PIN_INPUT_ENABLE(GPIO_PIN_MUX_REG[27]);
-    /* RXD0 to GPIO25 */
-    gpio_ll_iomux_func_sel(PERIPHS_IO_MUX_GPIO25_U, FUNC_GPIO25_EMAC_RXD0);
-    PIN_INPUT_ENABLE(GPIO_PIN_MUX_REG[25]);
-    /* RXD1 to GPIO26 */
-    gpio_ll_iomux_func_sel(PERIPHS_IO_MUX_GPIO26_U, FUNC_GPIO26_EMAC_RXD1);
-    PIN_INPUT_ENABLE(GPIO_PIN_MUX_REG[26]);
-}
-
-void emac_hal_iomux_init_tx_er(void)
-{
-    /* TX_ER to GPIO4 */
-    gpio_ll_iomux_func_sel(PERIPHS_IO_MUX_GPIO4_U, FUNC_GPIO4_EMAC_TX_ER);
-    PIN_INPUT_DISABLE(GPIO_PIN_MUX_REG[4]);
-}
-
-void emac_hal_iomux_init_rx_er(void)
-{
-    /* RX_ER to MTCK */
-    gpio_ll_iomux_func_sel(PERIPHS_IO_MUX_MTCK_U, FUNC_MTCK_EMAC_RX_ER);
-    PIN_INPUT_ENABLE(GPIO_PIN_MUX_REG[13]);
-}
-
-void emac_hal_init(emac_hal_context_t *hal, void *descriptors,
-                   uint8_t **rx_buf, uint8_t **tx_buf)
+void emac_hal_init(emac_hal_context_t *hal)
 {
     hal->dma_regs = &EMAC_DMA;
     hal->mac_regs = &EMAC_MAC;
+#if CONFIG_IDF_TARGET_ESP32
     hal->ext_regs = &EMAC_EXT;
-    hal->descriptors = descriptors;
-    hal->rx_buf = rx_buf;
-    hal->tx_buf = tx_buf;
+#else
+    hal->ext_regs = NULL;
+#endif
+#if SOC_EMAC_IEEE1588V2_SUPPORTED
+    hal->ptp_regs = &EMAC_PTP;
+#endif
 }
 
 void emac_hal_set_csr_clock_range(emac_hal_context_t *hal, int freq)
@@ -149,50 +57,10 @@ void emac_hal_set_csr_clock_range(emac_hal_context_t *hal, int freq)
     }
 }
 
-void emac_hal_reset_desc_chain(emac_hal_context_t *hal)
+void emac_hal_set_rx_tx_desc_addr(emac_hal_context_t *hal, eth_dma_rx_descriptor_t *rx_desc, eth_dma_tx_descriptor_t *tx_desc)
 {
-    /* reset DMA descriptors */
-    hal->rx_desc = (eth_dma_rx_descriptor_t *)(hal->descriptors);
-    hal->tx_desc = (eth_dma_tx_descriptor_t *)(hal->descriptors +
-                   sizeof(eth_dma_rx_descriptor_t) * CONFIG_ETH_DMA_RX_BUFFER_NUM);
-    /* init rx chain */
-    for (int i = 0; i < CONFIG_ETH_DMA_RX_BUFFER_NUM; i++) {
-        /* Set Own bit of the Rx descriptor Status: DMA */
-        hal->rx_desc[i].RDES0.Own = EMAC_LL_DMADESC_OWNER_DMA;
-        /* Set Buffer1 size and Second Address Chained bit */
-        hal->rx_desc[i].RDES1.SecondAddressChained = 1;
-        hal->rx_desc[i].RDES1.ReceiveBuffer1Size = CONFIG_ETH_DMA_BUFFER_SIZE;
-        /* Enable Ethernet DMA Rx Descriptor interrupt */
-        hal->rx_desc[i].RDES1.DisableInterruptOnComplete = 0;
-        /* point to the buffer */
-        hal->rx_desc[i].Buffer1Addr = (uint32_t)(hal->rx_buf[i]);
-        /* point to next descriptor */
-        hal->rx_desc[i].Buffer2NextDescAddr = (uint32_t)(hal->rx_desc + i + 1);
-    }
-    /* For last descriptor, set next descriptor address register equal to the first descriptor base address */
-    hal->rx_desc[CONFIG_ETH_DMA_RX_BUFFER_NUM - 1].Buffer2NextDescAddr = (uint32_t)(hal->rx_desc);
-
-    /* init tx chain */
-    for (int i = 0; i < CONFIG_ETH_DMA_TX_BUFFER_NUM; i++) {
-        /* Set Own bit of the Tx descriptor Status: CPU */
-        hal->tx_desc[i].TDES0.Own = EMAC_LL_DMADESC_OWNER_CPU;
-        hal->tx_desc[i].TDES0.SecondAddressChained = 1;
-        hal->tx_desc[i].TDES1.TransmitBuffer1Size = CONFIG_ETH_DMA_BUFFER_SIZE;
-        /* Enable Ethernet DMA Tx Descriptor interrupt */
-        hal->tx_desc[1].TDES0.InterruptOnComplete = 1;
-        /* Enable Transmit Timestamp */
-        hal->tx_desc[i].TDES0.TransmitTimestampEnable = 1;
-        /* point to the buffer */
-        hal->tx_desc[i].Buffer1Addr = (uint32_t)(hal->tx_buf[i]);
-        /* point to next descriptor */
-        hal->tx_desc[i].Buffer2NextDescAddr = (uint32_t)(hal->tx_desc + i + 1);
-    }
-    /* For last descriptor, set next descriptor address register equal to the first descriptor base address */
-    hal->tx_desc[CONFIG_ETH_DMA_TX_BUFFER_NUM - 1].Buffer2NextDescAddr = (uint32_t)(hal->tx_desc);
-
-    /* set base address of the first descriptor */
-    emac_ll_set_rx_desc_addr(hal->dma_regs, (uint32_t)hal->rx_desc);
-    emac_ll_set_tx_desc_addr(hal->dma_regs, (uint32_t)hal->tx_desc);
+    emac_ll_set_rx_desc_addr(hal->dma_regs, (uint32_t)rx_desc);
+    emac_ll_set_tx_desc_addr(hal->dma_regs, (uint32_t)tx_desc);
 }
 
 void emac_hal_init_mac_default(emac_hal_context_t *hal)
@@ -207,7 +75,7 @@ void emac_hal_init_mac_default(emac_hal_context_t *hal)
     /* Enable Carrier Sense During Transmission */
     emac_ll_carrier_sense_enable(hal->mac_regs, true);
     /* Select speed: port: 10/100 Mbps, here set default 100M, afterwards, will reset by auto-negotiation */
-    emac_ll_set_port_speed(hal->mac_regs, ETH_SPEED_100M);;
+    emac_ll_set_port_speed(hal->mac_regs, ETH_SPEED_100M);
     /* Allow the reception of frames when the TX_EN signal is asserted in Half-Duplex mode */
     emac_ll_recv_own_enable(hal->mac_regs, true);
     /* Disable internal loopback mode */
@@ -216,11 +84,11 @@ void emac_hal_init_mac_default(emac_hal_context_t *hal)
     emac_ll_set_duplex(hal->mac_regs, ETH_DUPLEX_FULL);
     /* Select the checksum mode for received frame payload's TCP/UDP/ICMP headers */
     emac_ll_checksum_offload_mode(hal->mac_regs, ETH_CHECKSUM_HW);
-    /* Enable MAC retry transmission when a colision occurs in half duplex mode */
+    /* Enable MAC retry transmission when a collision occurs in half duplex mode */
     emac_ll_retry_enable(hal->mac_regs, true);
     /* MAC passes all incoming frames to host, without modifying them */
     emac_ll_auto_pad_crc_strip_enable(hal->mac_regs, false);
-    /* Set Back-Off limit time before retry a transmittion after a collision */
+    /* Set Back-Off limit time before retry a transmission after a collision */
     emac_ll_set_back_off_limit(hal->mac_regs, EMAC_LL_BACKOFF_LIMIT_10);
     /* Disable deferral check, MAC defers until the CRS signal goes inactive */
     emac_ll_deferral_check_enable(hal->mac_regs, false);
@@ -270,14 +138,19 @@ void emac_hal_init_dma_default(emac_hal_context_t *hal, emac_hal_dma_config_t *h
     /* DMAOMR Configuration */
     /* Enable Dropping of TCP/IP Checksum Error Frames */
     emac_ll_drop_tcp_err_frame_enable(hal->dma_regs, true);
+#if CONFIG_IDF_TARGET_ESP32P4
+    /* Disable Receive Store Forward (Rx FIFO is only 256B) */
+    emac_ll_recv_store_forward_enable(hal->dma_regs, false);
+#else
     /* Enable Receive Store Forward */
     emac_ll_recv_store_forward_enable(hal->dma_regs, true);
+#endif
     /* Enable Flushing of Received Frames because of the unavailability of receive descriptors or buffers */
     emac_ll_flush_recv_frame_enable(hal->dma_regs, true);
     /* Disable Transmit Store Forward */
     emac_ll_trans_store_forward_enable(hal->dma_regs, false);
     /* Flush Transmit FIFO */
-    emac_ll_flush_trans_fifo_enable(hal->dma_regs, true);
+    emac_hal_flush_trans_fifo(hal);
     /* Transmit Threshold Control */
     emac_ll_set_transmit_threshold(hal->dma_regs, EMAC_LL_TRANSMIT_THRESHOLD_CONTROL_64);
     /* Disable Forward Error Frame */
@@ -287,7 +160,7 @@ void emac_hal_init_dma_default(emac_hal_context_t *hal, emac_hal_dma_config_t *h
     /* Receive Threshold Control */
     emac_ll_set_recv_threshold(hal->dma_regs, EMAC_LL_RECEIVE_THRESHOLD_CONTROL_64);
     /* Allow the DMA to process a second frame of Transmit data even before obtaining the status for the first frame */
-    emac_ll_opt_second_frame_enable(hal->dma_regs, true);;
+    emac_ll_opt_second_frame_enable(hal->dma_regs, true);
 
     /* DMABMR Configuration */
     /* Enable Mixed Burst */
@@ -329,26 +202,268 @@ void emac_hal_set_address(emac_hal_context_t *hal, uint8_t *mac_addr)
     }
 }
 
+#if SOC_EMAC_IEEE1588V2_SUPPORTED
+static inline uint32_t subsecond2nanosecond(emac_hal_context_t *hal, uint32_t subsecond)
+{
+    if (emac_ll_is_ts_digital_roll_set(hal->ptp_regs)) {
+        return subsecond;
+    }
+    uint64_t val = subsecond * 1000000000ll; // 1 s = 10e9 ns
+    val >>= 31; // Sub-Second register is 31 bit
+    return (uint32_t)val;
+}
+
+static inline uint32_t nanosecond2subsecond(emac_hal_context_t *hal, uint32_t nanosecond)
+{
+    if (emac_ll_is_ts_digital_roll_set(hal->ptp_regs)) {
+        return nanosecond;
+    }
+    uint64_t val = (uint64_t)nanosecond << 31;
+    val /= 1000000000ll;
+    return (uint32_t)val;
+}
+
+esp_err_t emac_hal_get_rxdesc_timestamp(emac_hal_context_t *hal, eth_dma_rx_descriptor_t *rxdesc, uint32_t *seconds, uint32_t *nano_seconds)
+{
+    if (!rxdesc->RDES0.TSAvailIPChecksumErrGiantFrame) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (seconds) {
+        *seconds = rxdesc->TimeStampHigh;
+    }
+    if (nano_seconds) {
+        *nano_seconds = subsecond2nanosecond(hal, rxdesc->TimeStampLow);
+    }
+    rxdesc->RDES0.TSAvailIPChecksumErrGiantFrame = 0;
+    return ESP_OK;
+}
+
+esp_err_t emac_hal_get_txdesc_timestamp(emac_hal_context_t *hal, eth_dma_tx_descriptor_t *txdesc, uint32_t *seconds, uint32_t *nano_seconds)
+{
+    if (txdesc->TDES0.Own == EMAC_LL_DMADESC_OWNER_DMA || !txdesc->TDES0.TxTimestampStatus) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (seconds) {
+        *seconds = txdesc->TimeStampHigh;
+    }
+    if (nano_seconds) {
+        *nano_seconds = subsecond2nanosecond(hal, txdesc->TimeStampLow);
+    }
+    txdesc->TDES0.TxTimestampStatus = 0;
+    return ESP_OK;
+}
+
+esp_err_t emac_hal_ptp_start(emac_hal_context_t *hal, const emac_hal_ptp_config_t *config)
+{
+    uint8_t base_increment;
+
+    // Enable time stamping frame filtering (applicable to receive)
+    emac_ll_ts_ptp_ether_enable(hal->ptp_regs, true);
+    // Process frames with v2 format
+    emac_ll_ptp_v2_proc_enable(hal->ptp_regs, true);
+
+    /* Un-mask the Time stamp trigger interrupt */
+    emac_ll_enable_corresponding_emac_intr(hal->mac_regs, EMAC_LL_CONFIG_ENABLE_MAC_INTR_MASK);
+
+    /* Enable the timestamp feature */
+    emac_ll_ts_enable(hal->ptp_regs, true);
+    /* Set digital or binary rollover */
+    if (config->roll == ETH_PTP_DIGITAL_ROLLOVER) {
+        emac_ll_ts_digital_roll_enable(hal->ptp_regs, true);
+    } else {
+        emac_ll_ts_digital_roll_enable(hal->ptp_regs, false);
+    }
+    /* Set sub second increment based on the required PTP accuracy */
+    if (emac_ll_is_ts_digital_roll_set(hal->ptp_regs)) {
+        /**
+         *   tick(ns)         10^9
+         * ———————————— = ————————————— ==> Increment = tick
+         *   Increment        10^9
+         */
+        base_increment = config->ptp_req_accuracy_ns;
+    } else {
+        /**
+         *   tick(ns)         10^9                       tick * 2^31      tick
+         * ———————————— = ————————————— ==> Increment = ————————————— ≈ —————————
+         *   Increment        2^31                           10^9         0.465
+         */
+        base_increment = config->ptp_req_accuracy_ns / 0.465;
+    }
+    emac_ll_set_ts_sub_second_incre_val(hal->ptp_regs, base_increment);
+    /* Set Update Mode */
+    emac_ll_set_ts_update_method(hal->ptp_regs, config->upd_method);
+    int32_t to = 0;
+    /* If you are using the Fine correction method */
+    if (config->upd_method == ETH_PTP_UPDATE_METHOD_FINE) {
+        /**
+         *           2^32                 2^32                      TsysClk(ns)
+         * Addend = ——————— = —————————————————————————— = 2^32 * ——————————————
+         *           ratio     SysClk(MHz)/PTPaccur(MHz)            Taccur(ns)
+         */
+        uint32_t base_addend = (1ll << 32) * config->ptp_clk_src_period_ns / config->ptp_req_accuracy_ns;
+        emac_ll_set_ts_addend_val(hal->ptp_regs, base_addend);
+        emac_ll_ts_addend_do_update(hal->ptp_regs);
+        while (!emac_ll_is_ts_addend_update_done(hal->ptp_regs) && to < EMAC_PTP_INIT_TIMEOUT_US) {
+            esp_rom_delay_us(1);
+            to++;
+        }
+        if (to >= EMAC_PTP_INIT_TIMEOUT_US) {
+            return ESP_ERR_TIMEOUT;
+        }
+    }
+    /* Initialize timestamp */
+    emac_ll_set_ts_update_second_val(hal->ptp_regs, 0);
+    emac_ll_set_ts_update_sub_second_val(hal->ptp_regs, 0);
+    emac_ll_ts_init_do(hal->ptp_regs);
+    to = 0;
+    while (!emac_ll_is_ts_init_done(hal->ptp_regs) && to < EMAC_PTP_INIT_TIMEOUT_US) {
+        esp_rom_delay_us(1);
+        to++;
+    }
+    if (to >= EMAC_PTP_INIT_TIMEOUT_US) {
+        return ESP_ERR_TIMEOUT;
+    }
+    return ESP_OK;
+}
+
+esp_err_t emac_hal_ptp_stop(emac_hal_context_t *hal)
+{
+    /* Disable the timestamp feature */
+    emac_ll_ts_enable(hal->ptp_regs, false);
+    return ESP_OK;
+}
+
+esp_err_t emac_hal_ptp_adj_inc(emac_hal_context_t *hal, int32_t adj_ppb)
+{
+    if (emac_ll_get_ts_update_method(hal->ptp_regs) != ETH_PTP_UPDATE_METHOD_FINE ||
+        !emac_ll_is_ts_addend_update_done(hal->ptp_regs)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    /**
+     *       Sysclk(MHz) * ppb    Sysclk * ppb
+     * var = ————————————————— = ———————————————
+     *            10^9                10^9
+     *
+     *          2^32 * PTPClk(MHz)                    2^32 * PTPClk(MHz)
+     * old = —————————————————————————  =>  SysClk = ——————————————————————
+     *             SysClk(MHz)                             old
+     *
+     *        2^32 * PTPClk(MHz)        2^32 * PTPClk(MHz)           2^32 * PTPClk(MHz)
+     * new = ———————————————————— = —————————————————————————— = ———————————————————————————————————— =
+     *        SysClk(MHz) - var                Sysclk * ppb       2^32 * PTPClk(MHz)    (     ppb  )
+     *                               SysClk - ———————————————    ———————————————————— - (1 - ——————)
+     *                                             10^9                old              (     10^9 )
+     *
+     *      old           old * 10^9
+     * = ————————————— = —————————————
+     *        ppb         10^9 - ppb
+     *   1 - ——————
+     *        10^9
+     */
+    static uint32_t addend_base = 0;
+    if (addend_base == 0) {
+        addend_base = emac_ll_get_ts_addend_val(hal->ptp_regs);
+    }
+
+    if (adj_ppb > 5120000) {
+        adj_ppb = 5120000;
+    }
+    if (adj_ppb < -5120000) {
+        adj_ppb = -5120000;
+    }
+    /* calculate the rate by which you want to speed up or slow down the system time increments */
+    int64_t addend_new = (int64_t)addend_base * 1000000000ll;
+    addend_new /= 1000000000ll - adj_ppb;
+
+    emac_ll_set_ts_addend_val(hal->ptp_regs, addend_new);
+    emac_ll_ts_addend_do_update(hal->ptp_regs);
+
+    return ESP_OK;
+}
+
+esp_err_t emac_hal_adj_freq_factor(emac_hal_context_t *hal, double scale_factor)
+{
+    if (emac_ll_get_ts_update_method(hal->ptp_regs) != ETH_PTP_UPDATE_METHOD_FINE ||
+        !emac_ll_is_ts_addend_update_done(hal->ptp_regs)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    uint32_t addend_new = (emac_ll_get_ts_addend_val(hal->ptp_regs) * scale_factor);
+    emac_ll_set_ts_addend_val(hal->ptp_regs, addend_new);
+    emac_ll_ts_addend_do_update(hal->ptp_regs);
+
+    return ESP_OK;
+}
+
+esp_err_t emac_hal_ptp_time_add(emac_hal_context_t *hal, uint32_t off_sec, uint32_t off_nsec, bool sign)
+{
+    emac_ll_set_ts_update_second_val(hal->ptp_regs, off_sec);
+    emac_ll_set_ts_update_sub_second_val(hal->ptp_regs, nanosecond2subsecond(hal, off_nsec));
+    if (sign) {
+        emac_ll_ts_update_time_add(hal->ptp_regs);
+    } else {
+        emac_ll_ts_update_time_sub(hal->ptp_regs);
+    }
+    if (!emac_ll_is_ts_update_time_done(hal->ptp_regs)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    emac_ll_ts_update_time_do(hal->ptp_regs);
+    return ESP_OK;
+}
+
+esp_err_t emac_hal_ptp_set_sys_time(emac_hal_context_t *hal, uint32_t seconds, uint32_t nano_seconds)
+{
+    emac_ll_set_ts_update_second_val(hal->ptp_regs, seconds);
+    emac_ll_set_ts_update_sub_second_val(hal->ptp_regs, nanosecond2subsecond(hal, nano_seconds));
+
+    if (!emac_ll_is_ts_init_done(hal->ptp_regs)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    emac_ll_ts_init_do(hal->ptp_regs);
+    return ESP_OK;
+}
+
+esp_err_t emac_hal_ptp_get_sys_time(emac_hal_context_t *hal, uint32_t *seconds, uint32_t *nano_seconds)
+{
+    if (seconds == NULL || nano_seconds == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *seconds = emac_ll_get_ts_seconds_val(hal->ptp_regs);
+    *nano_seconds = subsecond2nanosecond(hal, emac_ll_get_ts_sub_seconds_val(hal->ptp_regs));
+    return ESP_OK;
+}
+
+esp_err_t emac_hal_ptp_set_target_time(emac_hal_context_t *hal, uint32_t seconds, uint32_t nano_seconds)
+{
+    emac_ll_set_ts_target_second_val(hal->ptp_regs, seconds);
+    emac_ll_set_ts_target_sub_second_val(hal->ptp_regs, nanosecond2subsecond(hal, nano_seconds));
+    /*  Enable the PTP Time Stamp interrupt trigger */
+    emac_ll_ts_target_int_trig_enable(hal->ptp_regs);
+    return ESP_OK;
+}
+#endif // SOC_EMAC_IEEE1588V2_SUPPORTED
+
+
 void emac_hal_start(emac_hal_context_t *hal)
 {
     /* Enable Ethernet MAC and DMA Interrupt */
     emac_ll_enable_corresponding_intr(hal->dma_regs, EMAC_LL_CONFIG_ENABLE_INTR_MASK);
-
-    /* Flush Transmit FIFO */
-    emac_ll_flush_trans_fifo_enable(hal->dma_regs, true);
-
-    /* Start DMA transmission */
-    emac_ll_start_stop_dma_transmit(hal->dma_regs, true);
-    /* Start DMA reception */
-    emac_ll_start_stop_dma_receive(hal->dma_regs, true);
+    /* Clear all pending interrupts */
+    emac_ll_clear_all_pending_intr(hal->dma_regs);
 
     /* Enable transmit state machine of the MAC for transmission on the MII */
     emac_ll_transmit_enable(hal->mac_regs, true);
+    /* Start DMA transmission */
+    /* Note that the EMAC Databook states the DMA could be started prior enabling
+       the MAC transmitter. However, it turned out that such order may cause the MAC
+       transmitter hangs */
+    emac_ll_start_stop_dma_transmit(hal->dma_regs, true);
+
+    /* Start DMA reception */
+    emac_ll_start_stop_dma_receive(hal->dma_regs, true);
     /* Enable receive state machine of the MAC for reception from the MII */
     emac_ll_receive_enable(hal->mac_regs, true);
-
-    /* Clear all pending interrupts */
-    emac_ll_clear_all_pending_intr(hal->dma_regs);
 }
 
 esp_err_t emac_hal_stop(emac_hal_context_t *hal)
@@ -374,235 +489,11 @@ esp_err_t emac_hal_stop(emac_hal_context_t *hal)
     /* Stop DMA reception */
     emac_ll_start_stop_dma_receive(hal->dma_regs, false);
 
+    /* Flush Transmit FIFO */
+    emac_hal_flush_trans_fifo(hal);
+
     /* Disable Ethernet MAC and DMA Interrupt */
     emac_ll_disable_all_intr(hal->dma_regs);
 
     return ESP_OK;
-}
-
-uint32_t emac_hal_get_tx_desc_owner(emac_hal_context_t *hal)
-{
-    return hal->tx_desc->TDES0.Own;
-}
-
-uint32_t emac_hal_transmit_frame(emac_hal_context_t *hal, uint8_t *buf, uint32_t length)
-{
-    /* Get the number of Tx buffers to use for the frame */
-    uint32_t bufcount = 0;
-    uint32_t lastlen = length;
-    uint32_t sentout = 0;
-    while (lastlen > CONFIG_ETH_DMA_BUFFER_SIZE) {
-        lastlen -= CONFIG_ETH_DMA_BUFFER_SIZE;
-        bufcount++;
-    }
-    if (lastlen) {
-        bufcount++;
-    }
-    if (bufcount > CONFIG_ETH_DMA_TX_BUFFER_NUM) {
-        goto err;
-    }
-
-    eth_dma_tx_descriptor_t *desc_iter = hal->tx_desc;
-    /* A frame is transmitted in multiple descriptor */
-    for (size_t i = 0; i < bufcount; i++) {
-        /* Check if the descriptor is owned by the Ethernet DMA (when 1) or CPU (when 0) */
-        if (desc_iter->TDES0.Own != EMAC_LL_DMADESC_OWNER_CPU) {
-            goto err;
-        }
-        /* Clear FIRST and LAST segment bits */
-        desc_iter->TDES0.FirstSegment = 0;
-        desc_iter->TDES0.LastSegment = 0;
-        desc_iter->TDES0.InterruptOnComplete = 0;
-        if (i == 0) {
-            /* Setting the first segment bit */
-            desc_iter->TDES0.FirstSegment = 1;
-        }
-        if (i == (bufcount - 1)) {
-            /* Setting the last segment bit */
-            desc_iter->TDES0.LastSegment = 1;
-            /* Enable transmit interrupt */
-            desc_iter->TDES0.InterruptOnComplete = 1;
-            /* Program size */
-            desc_iter->TDES1.TransmitBuffer1Size = lastlen;
-            /* copy data from uplayer stack buffer */
-            memcpy((void *)(desc_iter->Buffer1Addr), buf + i * CONFIG_ETH_DMA_BUFFER_SIZE, lastlen);
-            sentout += lastlen;
-        } else {
-            /* Program size */
-            desc_iter->TDES1.TransmitBuffer1Size = CONFIG_ETH_DMA_BUFFER_SIZE;
-            /* copy data from uplayer stack buffer */
-            memcpy((void *)(desc_iter->Buffer1Addr), buf + i * CONFIG_ETH_DMA_BUFFER_SIZE, CONFIG_ETH_DMA_BUFFER_SIZE);
-            sentout += CONFIG_ETH_DMA_BUFFER_SIZE;
-        }
-        /* Point to next descriptor */
-        desc_iter = (eth_dma_tx_descriptor_t *)(desc_iter->Buffer2NextDescAddr);
-    }
-
-    /* Set Own bit of the Tx descriptor Status: gives the buffer back to ETHERNET DMA */
-    for (size_t i = 0; i < bufcount; i++) {
-        hal->tx_desc->TDES0.Own = EMAC_LL_DMADESC_OWNER_DMA;
-        hal->tx_desc = (eth_dma_tx_descriptor_t *)(hal->tx_desc->Buffer2NextDescAddr);
-    }
-    emac_ll_transmit_poll_demand(hal->dma_regs, 0);
-    return sentout;
-err:
-    return 0;
-}
-
-uint32_t emac_hal_transmit_multiple_buf_frame(emac_hal_context_t *hal, uint8_t **buffs, uint32_t *lengths, uint32_t buffs_cnt)
-{
-    /* Get the number of Tx buffers to use for the frame */
-    uint32_t dma_bufcount = 0;
-    uint32_t sentout = 0;
-    uint8_t *ptr = buffs[0];
-    uint32_t lastlen = lengths[0];
-    uint32_t avail_len = CONFIG_ETH_DMA_BUFFER_SIZE;
-
-    eth_dma_tx_descriptor_t *desc_iter = hal->tx_desc;
-    /* A frame is transmitted in multiple descriptor */
-    while (dma_bufcount < CONFIG_ETH_DMA_TX_BUFFER_NUM) {
-        /* Check if the descriptor is owned by the Ethernet DMA (when 1) or CPU (when 0) */
-        if (desc_iter->TDES0.Own != EMAC_LL_DMADESC_OWNER_CPU) {
-            goto err;
-        }
-        /* Clear FIRST and LAST segment bits */
-        desc_iter->TDES0.FirstSegment = 0;
-        desc_iter->TDES0.LastSegment = 0;
-        desc_iter->TDES0.InterruptOnComplete = 0;
-        desc_iter->TDES1.TransmitBuffer1Size = 0;
-        if (dma_bufcount == 0) {
-            /* Setting the first segment bit */
-            desc_iter->TDES0.FirstSegment = 1;
-        }
-
-        while (buffs_cnt > 0) {
-            /* Check if input buff data fits to currently available space in the descriptor */
-            if (lastlen < avail_len) {
-                /* copy data from uplayer stack buffer */
-                memcpy((void *)(desc_iter->Buffer1Addr + (CONFIG_ETH_DMA_BUFFER_SIZE - avail_len)), ptr, lastlen);
-                sentout += lastlen;
-                avail_len -= lastlen;
-                desc_iter->TDES1.TransmitBuffer1Size += lastlen;
-
-                /* Update processed input buffers info */
-                buffs_cnt--;
-                ptr = *(++buffs);
-                lastlen = *(++lengths);
-            /* There is only limited available space in the current descriptor, use it all */
-            } else {
-                /* copy data from uplayer stack buffer */
-                memcpy((void *)(desc_iter->Buffer1Addr + (CONFIG_ETH_DMA_BUFFER_SIZE - avail_len)), ptr, avail_len);
-                sentout += avail_len;
-                lastlen -= avail_len;
-                /* If lastlen is not zero, input buff will be fragmented over multiple descriptors */
-                if (lastlen > 0) {
-                    ptr += avail_len;
-                /* Input buff fully fits the descriptor, move to the next input buff */
-                } else {
-                    /* Update processed input buffers info */
-                    buffs_cnt--;
-                    ptr = *(++buffs);
-                    lastlen = *(++lengths);
-                }
-                avail_len = CONFIG_ETH_DMA_BUFFER_SIZE;
-                desc_iter->TDES1.TransmitBuffer1Size = CONFIG_ETH_DMA_BUFFER_SIZE;
-                /* The descriptor is full here so exit and use the next descriptor */
-                break;
-            }
-        }
-        /* Increase counter of utilized DMA buffers */
-        dma_bufcount++;
-
-        /* If all input buffers processed, mark as LAST segment and finish the coping */
-        if (buffs_cnt == 0) {
-            /* Setting the last segment bit */
-            desc_iter->TDES0.LastSegment = 1;
-            /* Enable transmit interrupt */
-            desc_iter->TDES0.InterruptOnComplete = 1;
-            break;
-        }
-
-        /* Point to next descriptor */
-        desc_iter = (eth_dma_tx_descriptor_t *)(desc_iter->Buffer2NextDescAddr);
-    }
-
-    /* Set Own bit of the Tx descriptor Status: gives the buffer back to ETHERNET DMA */
-    for (size_t i = 0; i < dma_bufcount; i++) {
-        hal->tx_desc->TDES0.Own = EMAC_LL_DMADESC_OWNER_DMA;
-        hal->tx_desc = (eth_dma_tx_descriptor_t *)(hal->tx_desc->Buffer2NextDescAddr);
-    }
-    emac_ll_transmit_poll_demand(hal->dma_regs, 0);
-    return sentout;
-err:
-    return 0;
-}
-
-uint32_t emac_hal_receive_frame(emac_hal_context_t *hal, uint8_t *buf, uint32_t size, uint32_t *frames_remain, uint32_t *free_desc)
-{
-    eth_dma_rx_descriptor_t *desc_iter = NULL;
-    eth_dma_rx_descriptor_t *first_desc = NULL;
-    uint32_t used_descs = 0;
-    uint32_t seg_count = 0;
-    uint32_t ret_len = 0;
-    uint32_t copy_len = 0;
-    uint32_t write_len = 0;
-    uint32_t frame_count = 0;
-
-    first_desc = hal->rx_desc;
-    desc_iter = hal->rx_desc;
-    /* Traverse descriptors owned by CPU */
-    while ((desc_iter->RDES0.Own != EMAC_LL_DMADESC_OWNER_DMA) && (used_descs < CONFIG_ETH_DMA_RX_BUFFER_NUM) && !frame_count) {
-        used_descs++;
-        seg_count++;
-        /* Last segment in frame */
-        if (desc_iter->RDES0.LastDescriptor) {
-            /* Get the Frame Length of the received packet: substruct 4 bytes of the CRC */
-            ret_len = desc_iter->RDES0.FrameLength - ETH_CRC_LENGTH;
-            /* packets larger than expected will be truncated */
-            copy_len = ret_len > size ? size : ret_len;
-            /* update unhandled frame count */
-            frame_count++;
-        }
-        /* First segment in frame */
-        if (desc_iter->RDES0.FirstDescriptor) {
-            first_desc = desc_iter;
-        }
-        /* point to next descriptor */
-        desc_iter = (eth_dma_rx_descriptor_t *)(desc_iter->Buffer2NextDescAddr);
-    }
-    /* there's at least one frame to process */
-    if (frame_count) {
-        /* check how many frames left to handle */
-        while ((desc_iter->RDES0.Own != EMAC_LL_DMADESC_OWNER_DMA) && (used_descs < CONFIG_ETH_DMA_RX_BUFFER_NUM)) {
-            used_descs++;
-            if (desc_iter->RDES0.LastDescriptor) {
-                frame_count++;
-            }
-            /* point to next descriptor */
-            desc_iter = (eth_dma_rx_descriptor_t *)(desc_iter->Buffer2NextDescAddr);
-        }
-        desc_iter = first_desc;
-        for (size_t i = 0; i < seg_count - 1; i++) {
-            used_descs--;
-            write_len = copy_len < CONFIG_ETH_DMA_BUFFER_SIZE ? copy_len : CONFIG_ETH_DMA_BUFFER_SIZE;
-            /* copy data to buffer */
-            memcpy(buf, (void *)(desc_iter->Buffer1Addr), write_len);
-            buf += write_len;
-            copy_len -= write_len;
-            /* Set Own bit in Rx descriptors: gives the buffers back to DMA */
-            desc_iter->RDES0.Own = EMAC_LL_DMADESC_OWNER_DMA;
-            desc_iter = (eth_dma_rx_descriptor_t *)(desc_iter->Buffer2NextDescAddr);
-        }
-        memcpy(buf, (void *)(desc_iter->Buffer1Addr), copy_len);
-        desc_iter->RDES0.Own = EMAC_LL_DMADESC_OWNER_DMA;
-        /* update rxdesc */
-        hal->rx_desc = (eth_dma_rx_descriptor_t *)(desc_iter->Buffer2NextDescAddr);
-        /* poll rx demand */
-        emac_ll_receive_poll_demand(hal->dma_regs, 0);
-        frame_count--;
-        used_descs--;
-    }
-    *frames_remain = frame_count;
-    *free_desc = CONFIG_ETH_DMA_RX_BUFFER_NUM - used_descs;
-    return ret_len;
 }

@@ -1,23 +1,19 @@
-// Copyright 2020-2021 Espressif Systems (Shanghai) CO LTD
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+/*
+ * SPDX-FileCopyrightText: 2023-2024 Espressif Systems (Shanghai) CO LTD
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #pragma once
 
 #include <stdbool.h>
 #include <string.h>
 #include "soc/hwcrypto_reg.h"
+#include "soc/pcr_struct.h"
 #include "hal/aes_types.h"
+
+#include "hal/efuse_hal.h"
+#include "soc/chip_revision.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -33,6 +29,27 @@ typedef enum {
     ESP_AES_STATE_DONE,     /* Transform completed */
 } esp_aes_state_t;
 
+/**
+ * @brief Enable the bus clock for AES peripheral module
+ *
+ * @param enable true to enable the module, false to disable the module
+ */
+static inline void aes_ll_enable_bus_clock(bool enable)
+{
+    PCR.aes_conf.aes_clk_en = enable;
+}
+
+/**
+ * @brief Reset the AES peripheral module
+ */
+static inline void aes_ll_reset_register(void)
+{
+    PCR.aes_conf.aes_rst_en = 1;
+    PCR.aes_conf.aes_rst_en = 0;
+
+    // Clear reset on digital signature also, otherwise AES is held in reset
+    PCR.ds_conf.ds_rst_en = 0;
+}
 
 /**
  * @brief Write the encryption/decryption key to hardware
@@ -50,7 +67,7 @@ static inline uint8_t aes_ll_write_key(const uint8_t *key, size_t key_word_len)
     uint32_t key_word;
     for (int i = 0; i < key_word_len; i++) {
         memcpy(&key_word, key + 4 * i, 4);
-        REG_WRITE(AES_KEY_BASE + i * 4,  key_word);
+        REG_WRITE(AES_KEY_0_REG + i * 4,  key_word);
         key_in_hardware += 4;
     }
     return key_in_hardware;
@@ -82,7 +99,7 @@ static inline void aes_ll_write_block(const void *input)
 
     for (int i = 0; i < AES_BLOCK_WORDS; i++) {
         memcpy(&input_word, (uint8_t*)input + 4 * i, 4);
-        REG_WRITE(AES_TEXT_IN_BASE + i * 4, input_word);
+        REG_WRITE(AES_TEXT_IN_0_REG + i * 4, input_word);
     }
 }
 
@@ -97,7 +114,7 @@ static inline void aes_ll_read_block(void *output)
     const size_t REG_WIDTH = sizeof(uint32_t);
 
     for (size_t i = 0; i < AES_BLOCK_WORDS; i++) {
-        output_word = REG_READ(AES_TEXT_OUT_BASE + (i * REG_WIDTH));
+        output_word = REG_READ(AES_TEXT_OUT_0_REG + (i * REG_WIDTH));
         /* Memcpy to avoid potential unaligned access */
         memcpy( (uint8_t*)output + i * 4, &output_word, sizeof(output_word));
     }
@@ -120,7 +137,7 @@ static inline void aes_ll_start_transform(void)
  */
 static inline esp_aes_state_t aes_ll_get_state(void)
 {
-    return REG_READ(AES_STATE_REG);
+    return (esp_aes_state_t)REG_READ(AES_STATE_REG);
 }
 
 
@@ -173,7 +190,7 @@ static inline void aes_ll_set_num_blocks(size_t num_blocks)
  */
 static inline void aes_ll_set_iv(const uint8_t *iv)
 {
-    uint32_t *reg_addr_buf = (uint32_t *)(AES_IV_BASE);
+    uint32_t *reg_addr_buf = (uint32_t *)(AES_IV_MEM);
     uint32_t iv_word;
 
     for (int i = 0; i < IV_WORDS; i++ ) {
@@ -192,7 +209,7 @@ static inline void aes_ll_read_iv(uint8_t *iv)
     const size_t REG_WIDTH = sizeof(uint32_t);
 
     for (size_t i = 0; i < IV_WORDS; i++) {
-        iv_word = REG_READ(AES_IV_BASE + (i * REG_WIDTH));
+        iv_word = REG_READ(AES_IV_MEM + (i * REG_WIDTH));
         /* Memcpy to avoid potential unaligned access */
         memcpy(iv + i * 4, &iv_word, sizeof(iv_word));
     }
@@ -224,9 +241,41 @@ static inline void aes_ll_interrupt_enable(bool enable)
  */
 static inline void aes_ll_interrupt_clear(void)
 {
-    REG_WRITE(AES_INT_CLR_REG, 1);
+    REG_WRITE(AES_INT_CLEAR_REG, 1);
 }
 
+/**
+ * @brief Enable the pseudo-round function during AES operations
+ *
+ * @param enable true to enable, false to disable
+ * @param base basic number of pseudo rounds, zero if disable
+ * @param increment increment number of pseudo rounds, zero if disable
+ * @param key_rng_cnt update frequency of the pseudo-key, zero if disable
+ */
+static inline void aes_ll_enable_pseudo_rounds(bool enable, uint8_t base, uint8_t increment, uint8_t key_rng_cnt)
+{
+    REG_SET_FIELD(AES_PSEUDO_REG, AES_PSEUDO_EN, enable);
+
+    if (enable) {
+        REG_SET_FIELD(AES_PSEUDO_REG, AES_PSEUDO_BASE, base);
+        REG_SET_FIELD(AES_PSEUDO_REG, AES_PSEUDO_INC, increment);
+        REG_SET_FIELD(AES_PSEUDO_REG, AES_PSEUDO_RNG_CNT, key_rng_cnt);
+    } else {
+        REG_SET_FIELD(AES_PSEUDO_REG, AES_PSEUDO_BASE, 0);
+        REG_SET_FIELD(AES_PSEUDO_REG, AES_PSEUDO_INC, 0);
+        REG_SET_FIELD(AES_PSEUDO_REG, AES_PSEUDO_RNG_CNT, 0);
+    }
+}
+
+/**
+ * @brief Check if the pseudo round function is supported
+ * The AES pseudo round function is only avliable in chip version
+ * above 1.2 in ESP32-H2
+ */
+static inline bool aes_ll_is_pseudo_rounds_function_supported(void)
+{
+    return ESP_CHIP_REV_ABOVE(efuse_hal_chip_revision(), 102);
+}
 
 #ifdef __cplusplus
 }

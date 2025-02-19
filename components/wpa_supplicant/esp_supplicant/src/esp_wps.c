@@ -1,10 +1,11 @@
 /*
- * SPDX-FileCopyrightText: 2019-2022 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2019-2024 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
 
 #include <string.h>
+#include <inttypes.h>
 
 #include "utils/includes.h"
 #include "common.h"
@@ -25,12 +26,15 @@
 #include "esp_err.h"
 #include "esp_private/wifi.h"
 #include "esp_wps_i.h"
+#include "esp_dpp_i.h"
 #include "esp_wps.h"
 #include "eap_common/eap_wsc_common.h"
 #include "esp_wpas_glue.h"
 
-void *s_wps_api_lock = NULL;  /* Used in WPS public API only, never be freed */
-void *s_wps_api_sem = NULL;   /* Sync semaphore used between WPS publi API caller task and WPS task */
+const char *wps_model_number = CONFIG_IDF_TARGET;
+
+void *s_wps_api_lock = NULL;  /* Used in WPS/WPS-REG public API only, never be freed */
+void *s_wps_api_sem = NULL;   /* Sync semaphore used between WPS/WPS-REG public API caller task and WPS task, never be freed */
 bool s_wps_enabled = false;
 #ifdef USE_WPS_TASK
 struct wps_rx_param {
@@ -39,13 +43,9 @@ struct wps_rx_param {
     int len;
     STAILQ_ENTRY(wps_rx_param) bqentry;
 };
-static STAILQ_HEAD(,wps_rx_param) s_wps_rxq;
+static STAILQ_HEAD(, wps_rx_param) s_wps_rxq;
 
-typedef struct {
-    void *arg;
-    int ret; /* return value */
-} wps_ioctl_param_t;
-
+static struct wps_sm_funcs *s_wps_sm_cb = NULL;
 static void *s_wps_task_hdl = NULL;
 static void *s_wps_queue = NULL;
 static void *s_wps_data_lock = NULL;
@@ -54,7 +54,7 @@ static uint8_t s_wps_sig_cnt[SIG_WPS_NUM] = {0};
 
 #endif
 
-void wifi_wps_scan_done(void *arg, STATUS status);
+void wifi_wps_scan_done(void *arg, ETS_STATUS status);
 void wifi_wps_scan(void *data, void *user_ctx);
 int wifi_station_wps_start(void);
 int wps_sm_rx_eapol_internal(u8 *src_addr, u8 *buf, u32 len);
@@ -72,6 +72,7 @@ void wifi_station_wps_msg_timeout(void *data, void *user_ctx);
 void wifi_station_wps_eapol_start_handle(void *data, void *user_ctx);
 void wifi_station_wps_success(void *data, void *user_ctx);
 void wifi_station_wps_timeout(void *data, void *user_ctx);
+int wps_delete_timer(void);
 
 struct wps_sm *gWpsSm = NULL;
 static wps_factory_information_t *s_factory_info = NULL;
@@ -86,7 +87,7 @@ static void wps_rxq_init(void)
 static void wps_rxq_enqueue(struct wps_rx_param *param)
 {
     DATA_MUTEX_TAKE();
-    STAILQ_INSERT_TAIL(&s_wps_rxq,param, bqentry);
+    STAILQ_INSERT_TAIL(&s_wps_rxq, param, bqentry);
     DATA_MUTEX_GIVE();
 }
 
@@ -96,7 +97,7 @@ static struct wps_rx_param * wps_rxq_dequeue(void)
     DATA_MUTEX_TAKE();
     if ((param = STAILQ_FIRST(&s_wps_rxq)) != NULL) {
         STAILQ_REMOVE_HEAD(&s_wps_rxq, bqentry);
-        STAILQ_NEXT(param,bqentry) = NULL;
+        STAILQ_NEXT(param, bqentry) = NULL;
     }
     DATA_MUTEX_GIVE();
     return param;
@@ -108,7 +109,7 @@ static void wps_rxq_deinit(void)
     DATA_MUTEX_TAKE();
     while ((param = STAILQ_FIRST(&s_wps_rxq)) != NULL) {
         STAILQ_REMOVE_HEAD(&s_wps_rxq, bqentry);
-        STAILQ_NEXT(param,bqentry) = NULL;
+        STAILQ_NEXT(param, bqentry) = NULL;
         os_free(param->buf);
         os_free(param);
     }
@@ -116,9 +117,9 @@ static void wps_rxq_deinit(void)
 }
 
 #ifdef USE_WPS_TASK
-void wps_task(void *pvParameters )
+void wps_task(void *pvParameters)
 {
-    ETSEvent *e;
+    ETSEvent e;
     wps_ioctl_param_t *param;
     bool del_task = false;
 
@@ -126,37 +127,39 @@ void wps_task(void *pvParameters )
 
     wpa_printf(MSG_DEBUG, "wps_Task enter");
     for (;;) {
-        if ( TRUE == os_queue_recv(s_wps_queue, &e, OS_BLOCK) ) {
+        if (TRUE == os_queue_recv(s_wps_queue, &e, OS_BLOCK)) {
 
-            if ( (e->sig >= SIG_WPS_ENABLE) && (e->sig < SIG_WPS_NUM) ) {
+            if ((e.sig >= SIG_WPS_ENABLE) && (e.sig < SIG_WPS_NUM)) {
                 DATA_MUTEX_TAKE();
-                if (s_wps_sig_cnt[e->sig]) {
-                    s_wps_sig_cnt[e->sig]--;
+                if (s_wps_sig_cnt[e.sig]) {
+                    s_wps_sig_cnt[e.sig]--;
                 } else {
-                    wpa_printf(MSG_ERROR, "wpsT: invalid sig cnt, sig=%d cnt=%d", e->sig, s_wps_sig_cnt[e->sig]);
+                    wpa_printf(MSG_ERROR, "wpsT: invalid sig cnt, sig=%" PRId32 " cnt=%d", e.sig, s_wps_sig_cnt[e.sig]);
                 }
                 DATA_MUTEX_GIVE();
             }
 
-            wpa_printf(MSG_DEBUG, "wpsT: rx sig=%d", e->sig);
+            wpa_printf(MSG_DEBUG, "wpsT: rx sig=%" PRId32 "", e.sig);
 
-            switch (e->sig) {
+            switch (e.sig) {
             case SIG_WPS_ENABLE:
             case SIG_WPS_DISABLE:
             case SIG_WPS_START:
-                param = (wps_ioctl_param_t *)e->par;
+                param = (wps_ioctl_param_t *)e.par;
                 if (!param) {
-                    wpa_printf(MSG_ERROR, "wpsT: invalid param sig=%d", e->sig);
+                    wpa_printf(MSG_ERROR, "wpsT: invalid param sig=%" PRId32 "", e.sig);
                     os_semphr_give(s_wps_api_sem);
                     break;
                 }
 
-                if (e->sig == SIG_WPS_ENABLE) {
+                if (e.sig == SIG_WPS_ENABLE) {
                     param->ret = wifi_wps_enable_internal((esp_wps_config_t *)(param->arg));
-                } else if (e->sig == SIG_WPS_DISABLE) {
+                } else if (e.sig == SIG_WPS_DISABLE) {
+                    DATA_MUTEX_TAKE();
                     param->ret = wifi_wps_disable_internal();
                     del_task = true;
                     s_wps_task_hdl = NULL;
+                    DATA_MUTEX_GIVE();
                 } else {
                     param->ret = wifi_station_wps_start();
                 }
@@ -195,10 +198,9 @@ void wps_task(void *pvParameters )
                 break;
 
             default:
-                wpa_printf(MSG_ERROR, "wpsT: invalid sig=%d", e->sig);
+                wpa_printf(MSG_ERROR, "wpsT: invalid sig=%" PRId32 "", e.sig);
                 break;
             }
-            os_free(e);
 
             if (del_task) {
                 wpa_printf(MSG_DEBUG, "wpsT: delete task");
@@ -214,34 +216,31 @@ void wps_task(void *pvParameters )
  */
 int wps_post(uint32_t sig, uint32_t par)
 {
-    wpa_printf(MSG_DEBUG, "wps post: sig=%d cnt=%d", sig, s_wps_sig_cnt[sig]);
+    wpa_printf(MSG_DEBUG, "wps post: sig=%" PRId32 " cnt=%d", sig, s_wps_sig_cnt[sig]);
+    ETSEvent evt;
 
+    if (!s_wps_task_hdl) {
+        wpa_printf(MSG_DEBUG, "wps post: sig=%" PRId32 " failed as wps task has been deinited", sig);
+        return ESP_FAIL;
+    }
     DATA_MUTEX_TAKE();
     if (s_wps_sig_cnt[sig]) {
-        wpa_printf(MSG_DEBUG, "wps post: sig=%d processing", sig);
+        wpa_printf(MSG_DEBUG, "wps post: sig=%" PRId32 " processing", sig);
         DATA_MUTEX_GIVE();
         return ESP_OK;
-    } else {
-        ETSEvent *evt = (ETSEvent *)os_malloc(sizeof(ETSEvent));
+    }
 
-        if (evt == NULL) {
-            wpa_printf(MSG_ERROR, "WPS: E N M");
-            DATA_MUTEX_GIVE();
-            return ESP_FAIL;
-        }
+    s_wps_sig_cnt[sig]++;
+    evt.sig = sig;
+    evt.par = par;
+    DATA_MUTEX_GIVE();
 
-        s_wps_sig_cnt[sig]++;
-        evt->sig = sig;
-        evt->par = par;
+    if (os_queue_send(s_wps_queue, &evt, os_task_ms_to_tick(10)) != TRUE) {
+        wpa_printf(MSG_ERROR, "WPS: Q S E");
+        DATA_MUTEX_TAKE();
+        s_wps_sig_cnt[sig]--;
         DATA_MUTEX_GIVE();
-
-        if (os_queue_send(s_wps_queue, &evt, os_task_ms_to_tick(10)) != TRUE) {
-            wpa_printf(MSG_ERROR, "WPS: Q S E");
-            DATA_MUTEX_TAKE();
-            s_wps_sig_cnt[sig]--;
-            DATA_MUTEX_GIVE();
-            return ESP_FAIL;
-        }
+        return ESP_FAIL;
     }
     return ESP_OK;
 }
@@ -269,14 +268,12 @@ static inline int wps_sm_ether_send(struct wps_sm *sm, u16 proto,
     return wpa_ether_send(sm, bssid, proto, data, data_len);
 }
 
-
 u8 *wps_sm_alloc_eapol(struct wps_sm *sm, u8 type,
                        const void *data, u16 data_len,
                        size_t *msg_len, void **data_pos)
 {
     return wpa_alloc_eapol(sm, type, data, data_len, msg_len, data_pos);
 }
-
 
 void wps_sm_free_eapol(u8 *buffer)
 {
@@ -330,11 +327,49 @@ wps_build_ic_appie_wps_ar(void)
     }
 }
 
+static bool ap_supports_sae(struct wps_scan_ie *scan)
+{
+    struct wpa_ie_data rsn_info;
+
+    if (!scan->rsn) {
+        return false;
+    }
+
+    wpa_parse_wpa_ie_rsn(scan->rsn, scan->rsn[1] + 2, &rsn_info);
+
+    if (rsn_info.key_mgmt & WPA_KEY_MGMT_SAE) {
+        return true;
+    }
+
+    return false;
+}
+
+static bool
+is_wps_pbc_overlap(struct wps_sm *sm, const u8 *sel_uuid)
+{
+    if (!sel_uuid) {
+        wpa_printf(MSG_DEBUG, "WPS: null uuid field");
+        return false;
+    }
+
+    if (os_memcmp(sel_uuid, sm->uuid, WPS_UUID_LEN) != 0) {
+        wpa_printf(MSG_DEBUG, "uuid is not same");
+        wpa_hexdump(MSG_DEBUG, "WPS: UUID of scanned BSS is",
+                    sel_uuid, WPS_UUID_LEN);
+        wpa_hexdump(MSG_DEBUG, "WPS: UUID of sm BSS is",
+                    sm->uuid, WPS_UUID_LEN);
+        return true;
+    }
+
+    return false;
+}
+
 static bool
 wps_parse_scan_result(struct wps_scan_ie *scan)
 {
     struct wps_sm *sm = gWpsSm;
     wifi_mode_t op_mode = 0;
+    sm->wps_pbc_overlap = false;
 
     if (!sm->is_wps_scan || !scan->bssid) {
         return false;
@@ -350,7 +385,7 @@ wps_parse_scan_result(struct wps_scan_ie *scan)
     esp_wifi_get_mode(&op_mode);
     if ((op_mode != WIFI_MODE_STA)
 #ifdef CONFIG_ESP_WIFI_SOFTAP_SUPPORT
-        && (op_mode != WIFI_MODE_APSTA)
+            && (op_mode != WIFI_MODE_APSTA)
 #endif
        ) {
         return false;
@@ -370,9 +405,10 @@ wps_parse_scan_result(struct wps_scan_ie *scan)
         bool ap_found = false;
         struct wpabuf *buf = wpabuf_alloc_copy(scan->wps + 6, scan->wps[1] - 4);
         int count;
+        const u8 *scan_uuid;
 
         if ((wps_get_type() == WPS_TYPE_PBC && wps_is_selected_pbc_registrar(buf)) ||
-            (wps_get_type() == WPS_TYPE_PIN && wps_is_addr_authorized(buf, sm->ownaddr, 1))) {
+                (wps_get_type() == WPS_TYPE_PIN && wps_is_addr_authorized(buf, sm->ownaddr, 1))) {
             /* Found one AP with selected registrar true */
             sm->ignore_sel_reg = false;
             sm->discard_ap_cnt = 0;
@@ -383,24 +419,47 @@ wps_parse_scan_result(struct wps_scan_ie *scan)
             for (count = 0; count < WPS_MAX_DIS_AP_NUM; count++) {
                 if (os_memcmp(sm->dis_ap_list[count].bssid, scan->bssid, ETH_ALEN) == 0) {
                     wpa_printf(MSG_INFO, "discard ap bssid "MACSTR, MAC2STR(scan->bssid));
+                    wpabuf_free(buf);
                     return false;
                 }
             }
         }
 
         if (ap_found || sm->ignore_sel_reg) {
-            wpabuf_free(buf);
+            if (scan->ssid[1] > SSID_MAX_LEN) {
+                wpabuf_free(buf);
+                return false;
+            }
             esp_wifi_enable_sta_privacy_internal();
-            os_memset(sm->ssid[0], 0, SSID_MAX_LEN);
-            strncpy((char *)sm->ssid[0], (char *)&scan->ssid[2], (int)scan->ssid[1]);
-            sm->ssid_len[0] = scan->ssid[1];
+            os_memset(sm->creds[0].ssid, 0, SSID_MAX_LEN);
+            os_memcpy(sm->creds[0].ssid, (char *)&scan->ssid[2], (int)scan->ssid[1]);
+            sm->creds[0].ssid_len = scan->ssid[1];
             if (scan->bssid && memcmp(sm->bssid, scan->bssid, ETH_ALEN) != 0) {
-                wpa_printf(MSG_INFO, "sm BSSid: "MACSTR " scan BSSID " MACSTR "\n",
+                wpa_printf(MSG_INFO, "sm BSSid: "MACSTR " scan BSSID " MACSTR,
                            MAC2STR(sm->bssid), MAC2STR(scan->bssid));
                 sm->discover_ssid_cnt++;
+                wpa_printf(MSG_INFO, "discoverd cnt is %d and chan is %d ", sm->discover_ssid_cnt, scan->chan);
                 os_memcpy(sm->bssid, scan->bssid, ETH_ALEN);
+
+                scan_uuid = wps_get_uuid_e(buf);
+                if (scan_uuid) {
+                    if (wps_get_type() == WPS_TYPE_PBC && is_wps_pbc_overlap(sm, scan_uuid) == true) {
+                        wpa_printf(MSG_INFO, "pbc_overlap flag is true");
+                        sm->wps_pbc_overlap = true;
+                    }
+                    os_memcpy(sm->uuid, scan_uuid, WPS_UUID_LEN);
+                }
+
+                if (ap_supports_sae(scan)) {
+                    wpa_printf(MSG_INFO, "AP supports SAE, get password in passphrase");
+                    sm->dev->config_methods |= WPS_CONFIG_DISPLAY | WPS_CONFIG_VIRT_DISPLAY;
+                    sm->wps->wps->config_methods |= WPS_CONFIG_DISPLAY | WPS_CONFIG_VIRT_DISPLAY;
+                    /* Reset assoc req, probe reset not needed */
+                    wps_build_ic_appie_wps_ar();
+                }
             }
-            wpa_printf(MSG_DEBUG, "wps discover [%s]", (char *)sm->ssid);
+            wpabuf_free(buf);
+            wpa_printf(MSG_DEBUG, "wps discover [%s] ", (char *)sm->creds[0].ssid);
             sm->channel = scan->chan;
 
             return true;
@@ -423,21 +482,23 @@ int wps_send_eap_identity_rsp(u8 id)
     eap_buf = eap_msg_alloc(EAP_VENDOR_IETF, EAP_TYPE_IDENTITY, sm->identity_len,
                             EAP_CODE_RESPONSE, id);
     if (!eap_buf) {
+        wpa_printf(MSG_ERROR, "eap buf allocation failed");
         ret = ESP_FAIL;
         goto _err;
     }
-
 
     wpabuf_put_data(eap_buf, sm->identity, sm->identity_len);
 
     buf = wps_sm_alloc_eapol(sm, IEEE802_1X_TYPE_EAP_PACKET, wpabuf_head_u8(eap_buf), wpabuf_len(eap_buf), (size_t *)&len, NULL);
     if (!buf) {
+        wpa_printf(MSG_ERROR, "buf allocation failed");
         ret = ESP_ERR_NO_MEM;
         goto _err;
     }
 
     ret = wps_sm_ether_send(sm, ETH_P_EAPOL, buf, len);
     if (ret) {
+        wpa_printf(MSG_ERROR, "wps sm ether send failed ret=%d", ret);
         ret = ESP_FAIL;
         goto _err;
     }
@@ -542,12 +603,26 @@ int wps_process_wps_mX_req(u8 *ubuf, int len, enum wps_process_res *res)
     int frag_len;
     u16 be_tot_len = 0;
 
-    if (!sm) {
+    if (!sm || !res) {
         return ESP_FAIL;
     }
 
     expd = (struct eap_expand *) ubuf;
     wpa_printf(MSG_DEBUG, "wps process mX req: len %d, tlen %d", len, tlen);
+
+    if (sm->state == WAIT_START) {
+        if (expd->opcode != WSC_Start) {
+            wpa_printf(MSG_DEBUG, "EAP-WSC: Unexpected Op-Code %d "
+                       "in WAIT_START state", expd->opcode);
+            return ESP_ERR_INVALID_STATE;
+        }
+        wpa_printf(MSG_DEBUG, "EAP-WSC: Received start");
+        sm->state = WPA_MESG;
+    } else if (expd->opcode == WSC_Start) {
+        wpa_printf(MSG_DEBUG, "EAP-WSC: Unexpected Op-Code %d",
+                   expd->opcode);
+        return ESP_ERR_INVALID_STATE;
+    }
 
     flag = *(u8 *)(ubuf + sizeof(struct eap_expand));
     if (flag & WPS_MSG_FLAG_LEN) {
@@ -565,7 +640,7 @@ int wps_process_wps_mX_req(u8 *ubuf, int len, enum wps_process_res *res)
         if (tlen > 50000) {
             wpa_printf(MSG_ERROR, "EAP-WSC: Invalid Message Length");
             return ESP_FAIL;
-	}
+        }
         wpa_printf(MSG_DEBUG, "rx frag msg id:%d, flag:%d, frag_len: %d, tot_len: %d, be_tot_len:%d", sm->current_identifier, flag, frag_len, tlen, be_tot_len);
         if (ESP_OK != wps_enrollee_process_msg_frag(&wps_buf, tlen, tbuf, frag_len, flag)) {
             if (wps_buf) {
@@ -575,9 +650,7 @@ int wps_process_wps_mX_req(u8 *ubuf, int len, enum wps_process_res *res)
             return ESP_FAIL;
         }
         if (flag & WPS_MSG_FLAG_MORE) {
-            if (res) {
-                *res = WPS_FRAGMENT;
-            }
+            *res = WPS_FRAGMENT;
             return ESP_OK;
         }
     } else { //not frag msg
@@ -595,10 +668,10 @@ int wps_process_wps_mX_req(u8 *ubuf, int len, enum wps_process_res *res)
 
     eloop_cancel_timeout(wifi_station_wps_msg_timeout, NULL, NULL);
 
-    if (res) {
-        *res = wps_enrollee_process_msg(sm->wps, expd->opcode, wps_buf);
-    } else {
-        wps_enrollee_process_msg(sm->wps, expd->opcode, wps_buf);
+    *res = wps_enrollee_process_msg(sm->wps, expd->opcode, wps_buf);
+
+    if (*res == WPS_FAILURE) {
+        sm->state = WPA_FAIL;
     }
 
     if (wps_buf) {
@@ -640,7 +713,6 @@ int wps_send_wps_mX_rsp(u8 id)
     wpabuf_put_u8(eap_buf, 0x00); /* flags */
     wpabuf_put_data(eap_buf, wpabuf_head_u8(wps_buf), wpabuf_len(wps_buf));
 
-
     wpabuf_free(wps_buf);
 
     buf = wps_sm_alloc_eapol(sm, IEEE802_1X_TYPE_EAP_PACKET, wpabuf_head_u8(eap_buf), wpabuf_len(eap_buf), (size_t *)&len, NULL);
@@ -660,8 +732,6 @@ _err:
     wpabuf_free(eap_buf);
     return ret;
 }
-
-
 
 int wps_tx_start(void)
 {
@@ -714,8 +784,7 @@ static int wps_sm_init(struct wps_sm *sm)
     sm->scan_cnt = 0;
     sm->discover_ssid_cnt = 0;
     os_bzero(sm->bssid, ETH_ALEN);
-    os_bzero(sm->ssid, sizeof(sm->ssid));
-    os_bzero(sm->ssid_len, sizeof(sm->ssid_len));
+    os_bzero(sm->creds, sizeof(sm->creds));
     sm->ap_cred_cnt = 0;
 
     return 0;
@@ -736,6 +805,7 @@ int wps_stop_process(wifi_event_sta_wps_fail_reason_t reason_code)
     wps_stop_connection_timers(sm);
     esp_wifi_disconnect();
 
+    sm->state = WPA_FAIL;
     wpa_printf(MSG_DEBUG, "Write wps_fail_information");
 
     esp_event_post(WIFI_EVENT, WIFI_EVENT_STA_WPS_ER_FAILED, &reason_code, sizeof(reason_code), OS_BLOCK);
@@ -755,7 +825,12 @@ int wps_finish(void)
     if (sm->wps->state == WPS_FINISHED) {
         wpa_printf(MSG_DEBUG, "wps finished------>");
         wps_set_status(WPS_STATUS_SUCCESS);
-        wps_stop_connection_timers(sm);
+        /* WPS finished, dequeue all timers */
+        wps_delete_timer();
+
+        esp_wifi_unset_appie_internal(WIFI_APPIE_WPS_PR);
+        esp_wifi_unset_appie_internal(WIFI_APPIE_WPS_AR);
+        esp_wifi_set_wps_cb_internal(NULL);
 
         if (sm->ap_cred_cnt == 1) {
             wifi_config_t *config = os_zalloc(sizeof(wifi_config_t));
@@ -764,16 +839,27 @@ int wps_finish(void)
                 return ESP_FAIL;
             }
 
-            os_memcpy(config->sta.ssid, sm->ssid[0], sm->ssid_len[0]);
-            os_memcpy(config->sta.password, sm->key[0], sm->key_len[0]);
+            esp_wifi_get_config(WIFI_IF_STA, config);
+            esp_wifi_disconnect();
+            os_memcpy(config->sta.ssid, sm->creds[0].ssid, sm->creds[0].ssid_len);
+            os_memcpy(config->sta.password, sm->creds[0].key, sm->creds[0].key_len);
             os_memcpy(config->sta.bssid, sm->bssid, ETH_ALEN);
+#ifndef CONFIG_WPS_STRICT
+            /* Some APs support AES in WPA IE, enable connection with them */
+            if (sm->creds[0].auth_type == WPS_AUTH_WPAPSK &&
+                    (sm->creds[0].encr_type & WPS_ENCR_AES)) {
+                config->sta.threshold.authmode = WIFI_AUTH_WPA_PSK;
+            }
+#endif
             config->sta.bssid_set = 0;
-            esp_wifi_set_config(0, config);
+            config->sta.sae_pwe_h2e = 0;
+            esp_wifi_set_config(WIFI_IF_STA, config);
+            esp_wifi_connect();
 
             os_free(config);
         }
         eloop_cancel_timeout(wifi_station_wps_success, NULL, NULL);
-	eloop_register_timeout(1, 0, wifi_station_wps_success, NULL, NULL);
+        eloop_register_timeout(1, 0, wifi_station_wps_success, NULL, NULL);
 
         ret = 0;
     } else {
@@ -781,8 +867,7 @@ int wps_finish(void)
         if (sm->ignore_sel_reg) {
             sm->discover_ssid_cnt = 0;
             esp_wifi_disconnect();
-            os_bzero(sm->ssid, sizeof(sm->ssid));
-            os_bzero(sm->ssid_len, sizeof(sm->ssid_len));
+            os_bzero(sm->creds, sizeof(sm->creds));
             wps_add_discard_ap(sm->bssid);
         } else {
             ret = wps_stop_process(WPS_FAIL_REASON_NORMAL);
@@ -790,6 +875,13 @@ int wps_finish(void)
     }
 
     return ret;
+}
+
+static void wps_sm_notify_deauth(void)
+{
+    if (gWpsSm && gWpsSm->wps->state != WPS_FINISHED) {
+        wps_stop_process(WPS_FAIL_REASON_RECV_DEAUTH);
+    }
 }
 
 /* Add current ap to discard ap list */
@@ -826,13 +918,13 @@ int wps_start_msg_timer(void)
 
     if (sm->wps->state == WPS_FINISHED) {
         msg_timeout = 100;
-        wpa_printf(MSG_DEBUG, "start msg timer WPS_FINISHED %d ms", msg_timeout);
+        wpa_printf(MSG_DEBUG, "start msg timer WPS_FINISHED %" PRId32 " ms", msg_timeout);
 	eloop_cancel_timeout(wifi_station_wps_msg_timeout, NULL, NULL);
 	eloop_register_timeout(0, msg_timeout*1000, wifi_station_wps_msg_timeout, NULL, NULL);
         ret = 0;
     } else if (sm->wps->state == RECV_M2) {
         msg_timeout = 5;
-        wpa_printf(MSG_DEBUG, "start msg timer RECV_M2 %d ms", msg_timeout);
+        wpa_printf(MSG_DEBUG, "start msg timer RECV_M2 %" PRId32 " s", msg_timeout);
 	eloop_cancel_timeout(wifi_station_wps_msg_timeout, NULL, NULL);
 	eloop_register_timeout(msg_timeout, 0, wifi_station_wps_msg_timeout, NULL, NULL);
         ret = 0;
@@ -905,12 +997,10 @@ int wps_sm_rx_eapol_internal(u8 *src_addr, u8 *buf, u32 len)
     }
 
     if (len < sizeof(*hdr) + sizeof(*ehdr)) {
-#ifdef DEBUG_PRINT
         wpa_printf(MSG_DEBUG,  "WPA: EAPOL frame too short to be a WPA "
                    "EAPOL-Key (len %lu, expecting at least %lu)",
                    (unsigned long) len,
                    (unsigned long) sizeof(*hdr) + sizeof(*ehdr));
-#endif
         return ESP_OK;
     }
 
@@ -922,28 +1012,22 @@ int wps_sm_rx_eapol_internal(u8 *src_addr, u8 *buf, u32 len)
     data_len = plen + sizeof(*hdr);
     eap_len = be_to_host16(ehdr->length);
 
-#ifdef DEBUG_PRINT
-    wpa_printf(MSG_DEBUG, "IEEE 802.1X RX: version=%d type=%d length=%d",
+    wpa_printf(MSG_DEBUG, "IEEE 802.1X RX: version=%d type=%d length=%" PRId32 "",
                hdr->version, hdr->type, plen);
-#endif
 
     if (hdr->version < EAPOL_VERSION) {
         /* TODO: backwards compatibility */
     }
     if (hdr->type != IEEE802_1X_TYPE_EAP_PACKET) {
-#ifdef DEBUG_PRINT
         wpa_printf(MSG_DEBUG, "WPS: EAP frame (type %u) discarded, "
                    "not a EAP PACKET frame", hdr->type);
-#endif
         ret = 0;
         goto out;
     }
     if (plen > len - sizeof(*hdr) || plen < sizeof(*ehdr)) {
-#ifdef DEBUG_PRINT
         wpa_printf(MSG_DEBUG, "WPA: EAPOL frame payload size %lu "
                    "invalid (frame size %lu)",
                    (unsigned long) plen, (unsigned long) len);
-#endif
         ret = 0;
         goto out;
     }
@@ -951,18 +1035,14 @@ int wps_sm_rx_eapol_internal(u8 *src_addr, u8 *buf, u32 len)
     wpa_hexdump(MSG_MSGDUMP, "WPA: RX EAPOL-EAP PACKET", tmp, len);
 
     if (data_len < len) {
-#ifdef DEBUG_PRINT
         wpa_printf(MSG_DEBUG, "WPA: ignoring %lu bytes after the IEEE "
                    "802.1X data", (unsigned long) len - data_len);
-#endif
     }
 
     if (eap_len != plen) {
-#ifdef DEBUG_PRINT
         wpa_printf(MSG_DEBUG, "WPA: EAPOL length %lu "
                    "invalid (eapol length %lu)",
                    (unsigned long) eap_len, (unsigned long) plen);
-#endif
         ret = 0;
         goto out;
     }
@@ -981,7 +1061,7 @@ int wps_sm_rx_eapol_internal(u8 *src_addr, u8 *buf, u32 len)
         wpa_printf(MSG_DEBUG, "error: receive eapol response frame!");
         ret = 0;
         break;
-    case EAP_CODE_REQUEST: {
+    case EAP_CODE_REQUEST:
         eap_type = ((u8 *)ehdr)[sizeof(*ehdr)];
         switch (eap_type) {
         case EAP_TYPE_IDENTITY:
@@ -993,24 +1073,24 @@ int wps_sm_rx_eapol_internal(u8 *src_addr, u8 *buf, u32 len)
             eloop_register_timeout(3, 0, wifi_station_wps_eapol_start_handle, NULL, NULL);
             break;
         case EAP_TYPE_EXPANDED:
-            wpa_printf(MSG_DEBUG, "=========expanded plen[%d], %d===========", plen, sizeof(*ehdr));
-            if (ehdr->identifier == sm->current_identifier) {
-                ret = 0;
-                wpa_printf(MSG_DEBUG, "wps: ignore overlap identifier");
-                goto out;
-            }
+            wpa_printf(MSG_DEBUG, "=========expanded plen[%" PRId32 "], %d===========", plen, sizeof(*ehdr));
             sm->current_identifier = ehdr->identifier;
 
             tmp = (u8 *)(ehdr + 1) + 1;
             ret = wps_process_wps_mX_req(tmp, plen - sizeof(*ehdr) - 1, &res);
-            if (ret == 0 && res != WPS_FAILURE && res != WPS_FRAGMENT) {
+            if (res == WPS_FRAGMENT) {
+                wpa_printf(MSG_DEBUG, "wps frag, silently exit", res);
+                ret = ESP_OK;
+                break;
+            }
+            if (ret == ESP_OK && res != WPS_FAILURE) {
                 ret = wps_send_wps_mX_rsp(ehdr->identifier);
-                if (ret == 0) {
+
+                if (ret == ESP_OK) {
                     wpa_printf(MSG_DEBUG, "sm->wps->state = %d", sm->wps->state);
                     wps_start_msg_timer();
                 }
-            } else if (ret == 0 && res == WPS_FRAGMENT) {
-                wpa_printf(MSG_DEBUG, "wps frag, continue...");
+            } else if (ret == ESP_ERR_INVALID_STATE) {
                 ret = ESP_OK;
             } else {
                 ret = ESP_FAIL;
@@ -1020,7 +1100,6 @@ int wps_sm_rx_eapol_internal(u8 *src_addr, u8 *buf, u32 len)
             break;
         }
         break;
-    }
     default:
         break;
     }
@@ -1052,10 +1131,10 @@ int wps_set_default_factory(void)
         }
     }
 
-    sprintf(s_factory_info->manufacturer, "ESPRESSIF");
-    sprintf(s_factory_info->model_name, "ESPRESSIF IOT");
-    sprintf(s_factory_info->model_number, "ESP32");
-    sprintf(s_factory_info->device_name, "ESP32 STATION");
+    os_snprintf(s_factory_info->manufacturer, WPS_MAX_MANUFACTURER_LEN, "ESPRESSIF");
+    os_snprintf(s_factory_info->model_name, WPS_MAX_MODEL_NUMBER_LEN, "ESPRESSIF IOT");
+    os_snprintf(s_factory_info->model_number, WPS_MAX_MODEL_NAME_LEN, wps_model_number);
+    os_snprintf(s_factory_info->device_name, WPS_MAX_DEVICE_NAME_LEN, "%s STATION", wps_model_number);
 
     return ESP_OK;
 }
@@ -1110,7 +1189,10 @@ int wps_dev_init(void)
         ret = ESP_FAIL;
         goto _out;
     }
-    dev->config_methods = WPS_CONFIG_VIRT_PUSHBUTTON | WPS_CONFIG_PHY_DISPLAY;
+    dev->config_methods = WPS_CONFIG_VIRT_PUSHBUTTON;
+#ifdef CONFIG_ESP_WIFI_WPS_PASSPHRASE
+    dev->config_methods |= WPS_CONFIG_DISPLAY | WPS_CONFIG_VIRT_DISPLAY;
+#endif
     dev->rf_bands = WPS_RF_24GHZ;
 
     WPA_PUT_BE16(dev->pri_dev_type, WPS_DEV_PHONE);
@@ -1129,35 +1211,35 @@ int wps_dev_init(void)
         ret = ESP_FAIL;
         goto _out;
     }
-    sprintf(dev->manufacturer, s_factory_info->manufacturer);
+    os_snprintf(dev->manufacturer, WPS_MAX_MANUFACTURER_LEN, s_factory_info->manufacturer);
 
     dev->model_name = os_zalloc(WPS_MAX_MODEL_NAME_LEN);
     if (!dev->model_name) {
         ret = ESP_FAIL;
         goto _out;
     }
-    sprintf(dev->model_name, s_factory_info->model_name);
+    os_snprintf(dev->model_name, WPS_MAX_MODEL_NAME_LEN, s_factory_info->model_name);
 
     dev->model_number = os_zalloc(WPS_MAX_MODEL_NAME_LEN);
     if (!dev->model_number) {
         ret = ESP_FAIL;
         goto _out;
     }
-    sprintf(dev->model_number, s_factory_info->model_number);
+    os_snprintf(dev->model_number, WPS_MAX_MODEL_NAME_LEN, s_factory_info->model_number);
 
     dev->device_name = os_zalloc(WPS_MAX_DEVICE_NAME_LEN);
     if (!dev->device_name) {
         ret = ESP_FAIL;
         goto _out;
     }
-    sprintf(dev->device_name, s_factory_info->device_name);
+    os_snprintf(dev->device_name, WPS_MAX_DEVICE_NAME_LEN, s_factory_info->device_name);
 
     dev->serial_number = os_zalloc(16);
     if (!dev->serial_number) {
         ret = ESP_FAIL;
         goto _out;
     }
-    sprintf(dev->serial_number, "%02x%02x%02x%02x%02x%02x",
+    os_snprintf(dev->serial_number, 16, "%02x%02x%02x%02x%02x%02x",
             sm->ownaddr[0], sm->ownaddr[1], sm->ownaddr[2],
             sm->ownaddr[3], sm->ownaddr[4], sm->ownaddr[5]);
 
@@ -1179,22 +1261,7 @@ int wps_dev_deinit(struct wps_device_data *dev)
     if (!dev) {
         return ESP_FAIL;
     }
-
-    if (dev->manufacturer) {
-        os_free(dev->manufacturer);
-    }
-    if (dev->model_name) {
-        os_free(dev->model_name);
-    }
-    if (dev->model_number) {
-        os_free(dev->model_number);
-    }
-    if (dev->device_name) {
-        os_free(dev->device_name);
-    }
-    if (dev->serial_number) {
-        os_free(dev->serial_number);
-    }
+    wps_device_data_free(dev);
 
     if (s_factory_info) {
         os_free(s_factory_info);
@@ -1251,8 +1318,7 @@ wifi_station_wps_msg_timeout_internal(void)
     if (sm->ignore_sel_reg) {
         esp_wifi_disconnect();
         wps_add_discard_ap(sm->bssid);
-        os_bzero(sm->ssid, sizeof(sm->ssid));
-        os_bzero(sm->ssid_len, sizeof(sm->ssid_len));
+        os_bzero(sm->creds, sizeof(sm->creds));
         os_bzero(sm->bssid, ETH_ALEN);
         sm->discover_ssid_cnt = 0;
         wifi_wps_scan(NULL, NULL);
@@ -1282,8 +1348,8 @@ void wifi_station_wps_success_internal(void)
     if (sm->ap_cred_cnt > 1) {
         evt.ap_cred_cnt = sm->ap_cred_cnt;
         for (i = 0; i < MAX_WPS_AP_CRED; i++) {
-            os_memcpy(evt.ap_cred[i].ssid, sm->ssid[i], sm->ssid_len[i]);
-            os_memcpy(evt.ap_cred[i].passphrase, sm->key[i], sm->key_len[i]);
+            os_memcpy(evt.ap_cred[i].ssid, sm->creds[i].ssid, sm->creds[i].ssid_len);
+            os_memcpy(evt.ap_cred[i].passphrase, sm->creds[i].key, sm->creds[i].key_len);
         }
         esp_event_post(WIFI_EVENT, WIFI_EVENT_STA_WPS_ER_SUCCESS, &evt,
                                 sizeof(evt), OS_BLOCK);
@@ -1321,17 +1387,13 @@ void wifi_station_wps_eapol_start_handle(void *data, void *user_ctx)
 
 static int save_credentials_cb(void *ctx, const struct wps_credential *cred)
 {
-    if (!gWpsSm || !cred || gWpsSm->ap_cred_cnt > 2) {
+    struct wps_credential *creds;
+    if (!gWpsSm || !cred || gWpsSm->ap_cred_cnt >= MAX_CRED_COUNT) {
         return ESP_FAIL;
     }
 
-    os_memset(gWpsSm->ssid[gWpsSm->ap_cred_cnt], 0x00, sizeof(gWpsSm->ssid[gWpsSm->ap_cred_cnt]));
-    os_memset(gWpsSm->key[gWpsSm->ap_cred_cnt], 0x00, sizeof(gWpsSm->key[gWpsSm->ap_cred_cnt]));
-
-    os_memcpy(gWpsSm->ssid[gWpsSm->ap_cred_cnt], cred->ssid, cred->ssid_len);
-    gWpsSm->ssid_len[gWpsSm->ap_cred_cnt] = cred->ssid_len;
-    os_memcpy(gWpsSm->key[gWpsSm->ap_cred_cnt], cred->key, cred->key_len);
-    gWpsSm->key_len[gWpsSm->ap_cred_cnt] = cred->key_len;
+    creds = &gWpsSm->creds[gWpsSm->ap_cred_cnt];
+    memcpy(creds, cred, sizeof(*creds));
 
     gWpsSm->ap_cred_cnt++;
 
@@ -1349,21 +1411,28 @@ int wps_init_cfg_pin(struct wps_config *cfg)
     }
 
     cfg->pbc = 0;
-    if (os_strncmp((char *)cfg->pin, "00000000", 8) != 0) {
+
+    if ((os_strncmp((char *)cfg->pin, "00000000", 8) == 0) || !wps_pin_str_valid((char *)cfg->pin)) {
         unsigned int spin = 0;
+
         cfg->dev_pw_id = DEV_PW_DEFAULT;
         cfg->pin_len = 8;
         if (wps_generate_pin(&spin) < 0) {
             return -1;
 	}
-        os_sprintf((char *)cfg->pin, "%08d", spin);
+        wpa_printf(MSG_INFO, "Provided PIN %s is not valid, generated a new PIN %08d", (char *)cfg->pin, spin);
+        os_snprintf((char *)cfg->pin, 9, "%08d", spin);
     }
 
     return 0;
 }
 
-int
-wifi_station_wps_init(void)
+struct wps_sm_funcs* wps_get_wps_sm_cb(void)
+{
+    return s_wps_sm_cb;
+}
+
+static int wifi_station_wps_init(const esp_wps_config_t *config)
 {
     struct wps_funcs *wps_cb;
     struct wps_sm *sm = NULL;
@@ -1383,6 +1452,7 @@ wifi_station_wps_init(void)
     sm = gWpsSm;
 
     esp_wifi_get_macaddr_internal(WIFI_IF_STA, sm->ownaddr);
+    os_memcpy(gWpaSm.own_addr, sm->ownaddr, ETH_ALEN);
 
     sm->identity_len = WSC_ID_ENROLLEE_LEN;
     os_memcpy(sm->identity, WSC_ID_ENROLLEE, sm->identity_len);
@@ -1398,11 +1468,13 @@ wifi_station_wps_init(void)
 
     cfg.wps = sm->wps_ctx;
 
+    os_memcpy((void *)cfg.pin, config->pin, 8);
     if (wps_init_cfg_pin(&cfg) < 0) {
         goto _err;
     }
 
     os_memcpy(cfg.wps->uuid, sm->uuid, WPS_UUID_LEN);
+    cfg.wps->config_methods = sm->wps_ctx->dev.config_methods;
     if ((sm->wps = wps_init(&cfg)) == NULL) {         /* alloc wps_data */
         goto _err;
     }
@@ -1441,6 +1513,12 @@ wifi_station_wps_init(void)
     wps_cb->wps_start_pending = wps_start_pending;
     esp_wifi_set_wps_cb_internal(wps_cb);
 
+    s_wps_sm_cb = os_malloc(sizeof(struct wps_sm_funcs));
+    if (s_wps_sm_cb == NULL) {
+        goto _err;
+    }
+    s_wps_sm_cb->wps_sm_notify_deauth = wps_sm_notify_deauth;
+
     return ESP_OK;
 
 _err:
@@ -1452,6 +1530,9 @@ _err:
         sm->dev = NULL;
     }
     if (sm->wps_ctx) {
+        if (sm->wps_ctx->dh_privkey) {
+            wpabuf_free(sm->wps_ctx->dh_privkey);
+        }
         os_free(sm->wps_ctx);
         sm->wps_ctx = NULL;
     }
@@ -1501,12 +1582,19 @@ wifi_station_wps_deinit(void)
         sm->dev = NULL;
     }
     if (sm->wps_ctx) {
+        if (sm->wps_ctx->dh_privkey) {
+            wpabuf_free(sm->wps_ctx->dh_privkey);
+        }
         os_free(sm->wps_ctx);
         sm->wps_ctx = NULL;
     }
     if (sm->wps) {
         wps_deinit(sm->wps);
         sm->wps = NULL;
+    }
+    if (s_wps_sm_cb) {
+        os_free(s_wps_sm_cb);
+        s_wps_sm_cb = NULL;
     }
     os_free(gWpsSm);
     gWpsSm = NULL;
@@ -1521,7 +1609,7 @@ wps_sm_get(void)
 }
 
 void
-wifi_wps_scan_done(void *arg, STATUS status)
+wifi_wps_scan_done(void *arg, ETS_STATUS status)
 {
     struct wps_sm *sm = gWpsSm;
     wifi_config_t wifi_config = {0};
@@ -1540,9 +1628,14 @@ wifi_wps_scan_done(void *arg, STATUS status)
     } else if (sm->discover_ssid_cnt == 0)  {
         wps_set_status(WPS_STATUS_SCANNING);
     } else {
-        wpa_printf(MSG_INFO, "PBC session overlap!");
-        wps_set_status(WPS_STATUS_DISABLE);
-        esp_event_post(WIFI_EVENT, WIFI_EVENT_STA_WPS_ER_PBC_OVERLAP, 0, 0, OS_BLOCK);
+        if (sm->wps_pbc_overlap) {
+            sm->wps_pbc_overlap = false;
+            wpa_printf(MSG_INFO, "PBC session overlap!");
+            wps_set_status(WPS_STATUS_DISABLE);
+            esp_event_post(WIFI_EVENT, WIFI_EVENT_STA_WPS_ER_PBC_OVERLAP, 0, 0, OS_BLOCK);
+        } else {
+            wps_set_status(WPS_STATUS_PENDING);
+        }
     }
 
     wpa_printf(MSG_DEBUG, "wps scan_done discover_ssid_cnt = %d", sm->discover_ssid_cnt);
@@ -1553,23 +1646,26 @@ wifi_wps_scan_done(void *arg, STATUS status)
         esp_wifi_disconnect();
 
         os_memcpy(wifi_config.sta.bssid, sm->bssid, ETH_ALEN);
-        os_strncpy((char *)wifi_config.sta.ssid, (char *)sm->ssid[0], sm->ssid_len[0]);
+        os_memcpy(wifi_config.sta.ssid, (char *)sm->creds[0].ssid, sm->creds[0].ssid_len);
         wifi_config.sta.bssid_set = 1;
+        wifi_config.sta.channel = sm->channel;
         wpa_printf(MSG_INFO, "WPS: connecting to %s, bssid=" MACSTR,
-                   (char *)sm->ssid[0], MAC2STR(wifi_config.sta.bssid));
+                   (char *)sm->creds[0].ssid, MAC2STR(wifi_config.sta.bssid));
         esp_wifi_set_config(0, &wifi_config);
 
         wpa_printf(MSG_DEBUG, "WPS: neg start");
+        wifi_config.sta.failure_retry_cnt = 2;
         esp_wifi_connect();
-	eloop_cancel_timeout(wifi_station_wps_msg_timeout, NULL, NULL);
-	eloop_register_timeout(2, 0, wifi_station_wps_msg_timeout, NULL, NULL);
+        sm->state = WAIT_START;
+        eloop_cancel_timeout(wifi_station_wps_msg_timeout, NULL, NULL);
+        eloop_register_timeout(2, 0, wifi_station_wps_msg_timeout, NULL, NULL);
     } else if (wps_get_status() == WPS_STATUS_SCANNING) {
         if (wps_get_type() == WPS_TYPE_PIN && sm->scan_cnt > WPS_IGNORE_SEL_REG_MAX_CNT) {
             wpa_printf(MSG_INFO, "WPS: ignore selected registrar after %d scans", sm->scan_cnt);
             sm->ignore_sel_reg = true;
         }
         eloop_cancel_timeout(wifi_wps_scan, NULL, NULL);
-	eloop_register_timeout(0, 100*1000, wifi_wps_scan, NULL, NULL);
+        eloop_register_timeout(2, 0, wifi_wps_scan, NULL, NULL);
     } else {
         return;
     }
@@ -1583,7 +1679,7 @@ wifi_wps_scan_internal(void)
     sm->scan_cnt++;
     wpa_printf(MSG_DEBUG, "wifi_wps_scan : %d", sm->scan_cnt);
 
-    typedef void (* scan_done_cb_t)(void *arg, STATUS status);
+    typedef void (* scan_done_cb_t)(void *arg, ETS_STATUS status);
     extern int esp_wifi_promiscuous_scan_start(wifi_scan_config_t *config, scan_done_cb_t cb);
     esp_wifi_promiscuous_scan_start(NULL, wifi_wps_scan_done);
 }
@@ -1608,26 +1704,27 @@ int wifi_station_wps_start(void)
     struct wps_sm *sm = wps_sm_get();
 
     if (!sm) {
-        wpa_printf(MSG_ERROR, "WPS: wps not initial");
+        wpa_printf(MSG_ERROR, "WPS: wps is not initialized");
         return ESP_FAIL;
     }
 
     eloop_register_timeout(120, 0, wifi_station_wps_timeout, NULL, NULL);
 
     switch (wps_get_status()) {
-    case WPS_STATUS_DISABLE: {
+    case WPS_STATUS_DISABLE:
         sm->is_wps_scan = true;
 
         wps_build_public_key(sm->wps, NULL);
-        sm->wps->wps->dh_privkey = wpabuf_dup(sm->wps->dh_privkey);
+        if (sm->wps->wps->dh_privkey) {
+            wpabuf_free(sm->wps->wps->dh_privkey);
+        }
+        sm->wps->wps->dh_privkey = sm->wps->dh_privkey;
         sm->wps->wps->dh_ctx = sm->wps->dh_ctx;
         sm->wps->wps->dh_pubkey = sm->wps->dh_pubkey_e;
         sm->wps->wps->rf_band_cb = wps_rf_band_cb;
-        wpabuf_clear_free(sm->wps->dh_privkey);
         sm->wps->dh_privkey = NULL;
         wifi_wps_scan(NULL, NULL);
         break;
-    }
     case WPS_STATUS_SCANNING:
         sm->scan_cnt = 0;
         eloop_cancel_timeout(wifi_station_wps_timeout, NULL, NULL);
@@ -1669,9 +1766,8 @@ int wps_task_deinit(void)
     }
 
     if (s_wps_data_lock) {
-        os_semphr_delete(s_wps_data_lock);
+        os_mutex_delete(s_wps_data_lock);
         s_wps_data_lock = NULL;
-        wpa_printf(MSG_DEBUG, "wps task deinit: free data lock");
     }
 
     return ESP_OK;
@@ -1685,10 +1781,12 @@ int wps_task_init(void)
      */
     wps_task_deinit();
 
-    s_wps_data_lock = os_recursive_mutex_create();
     if (!s_wps_data_lock) {
-        wpa_printf(MSG_ERROR, "wps task init: failed to alloc data lock");
-        goto _wps_no_mem;
+        s_wps_data_lock = os_recursive_mutex_create();
+        if (!s_wps_data_lock) {
+            wpa_printf(MSG_ERROR, "wps task init: failed to alloc data lock");
+            goto _wps_no_mem;
+        }
     }
 
     s_wps_api_sem = os_semphr_create(1, 0);
@@ -1704,7 +1802,7 @@ int wps_task_init(void)
     }
 
     os_bzero(s_wps_sig_cnt, SIG_WPS_NUM);
-    s_wps_queue = os_queue_create(SIG_WPS_NUM, sizeof(s_wps_queue));
+    s_wps_queue = os_queue_create(SIG_WPS_NUM, sizeof(ETSEvent));
     if (!s_wps_queue) {
         wpa_printf(MSG_ERROR, "wps task init: failed to alloc queue");
         goto _wps_no_mem;
@@ -1750,7 +1848,6 @@ int wps_post_block(uint32_t sig, void *arg)
 
 int wps_check_wifi_mode(void)
 {
-    bool sniffer = false;
     wifi_mode_t mode;
     int ret;
 
@@ -1760,18 +1857,12 @@ int wps_check_wifi_mode(void)
         return ESP_FAIL;
     }
 
-    ret = esp_wifi_get_promiscuous(&sniffer);
-    if (ESP_OK != ret) {
-        wpa_printf(MSG_ERROR, "wps check wifi mode: failed to get sniffer mode ret=%d", ret);
-        return ESP_FAIL;
-    }
-
     if (
 #ifdef CONFIG_ESP_WIFI_SOFTAP_SUPPORT
         mode == WIFI_MODE_AP ||
 #endif
-        mode == WIFI_MODE_NULL || sniffer == true) {
-        wpa_printf(MSG_ERROR, "wps check wifi mode: wrong wifi mode=%d sniffer=%d", mode, sniffer);
+        mode == WIFI_MODE_NULL) {
+        wpa_printf(MSG_ERROR, "wps check wifi mode: wrong wifi mode=%d ", mode);
         return ESP_ERR_WIFI_MODE;
     }
 
@@ -1780,17 +1871,33 @@ int wps_check_wifi_mode(void)
 
 int esp_wifi_wps_enable(const esp_wps_config_t *config)
 {
-    int ret;
+    int ret = ESP_OK;
+    struct wps_sm *sm = gWpsSm;
+
+    if (esp_wifi_get_user_init_flag_internal() == 0) {
+        wpa_printf(MSG_ERROR, "wps enable: wifi not started cannot disable wpsreg");
+        return ESP_ERR_WIFI_STATE;
+    }
 
     if (ESP_OK != wps_check_wifi_mode()) {
         return ESP_ERR_WIFI_MODE;
     }
 
+    if (is_dpp_enabled()) {
+        wpa_printf(MSG_ERROR, "wps enabled failed since DPP is initialized");
+        return ESP_FAIL;
+    }
+
     API_MUTEX_TAKE();
     if (s_wps_enabled) {
+        if (sm && os_memcmp(sm->identity, WSC_ID_REGISTRAR, sm->identity_len) == 0) {
+            wpa_printf(MSG_ERROR, "wps enable: wpsreg already enabled cannot enable wps enrollee");
+            ret = ESP_ERR_WIFI_MODE;
+        } else {
+            wpa_printf(MSG_DEBUG, "wps enable: already enabled");
+        }
         API_MUTEX_GIVE();
-        wpa_printf(MSG_DEBUG, "wps enable: already enabled");
-        return ESP_OK;
+        return ret;
     }
 
 #ifdef USE_WPS_TASK
@@ -1808,7 +1915,7 @@ int esp_wifi_wps_enable(const esp_wps_config_t *config)
     }
 
     s_wps_enabled = true;
-    wpa_printf(MSG_DEBUG, "wifi wps task: prio:%d, stack:%d\n", 2, WPS_TASK_STACK_SIZE);
+    wpa_printf(MSG_DEBUG, "wifi wps task: prio:%d, stack:%d", 2, WPS_TASK_STACK_SIZE);
     API_MUTEX_GIVE();
     return ret;
 #else
@@ -1818,41 +1925,51 @@ int esp_wifi_wps_enable(const esp_wps_config_t *config)
 #endif
 }
 
+bool is_wps_enabled(void)
+{
+    return s_wps_enabled;
+}
+
 int wifi_wps_enable_internal(const esp_wps_config_t *config)
 {
     int ret = 0;
+    struct wpa_sm *wpa_sm = &gWpaSm;
 
     wpa_printf(MSG_DEBUG, "ESP WPS crypto initialize!");
     if (config->wps_type == WPS_TYPE_DISABLE) {
         wpa_printf(MSG_ERROR, "wps enable: invalid wps type");
         return ESP_ERR_WIFI_WPS_TYPE;
     }
-
     wpa_printf(MSG_DEBUG, "Set factory information.");
     ret = wps_set_factory_info(config);
     if (ret != 0) {
         return ret;
     }
 
-    wpa_printf(MSG_INFO, "wifi_wps_enable\n");
+    wpa_printf(MSG_INFO, "wifi_wps_enable");
 
     wps_set_type(config->wps_type);
     wps_set_status(WPS_STATUS_DISABLE);
 
-    ret = wifi_station_wps_init();
+    ret = wifi_station_wps_init(config);
 
     if (ret != 0) {
-        wps_set_type(WPS_STATUS_DISABLE);
+        wps_set_type(WPS_TYPE_DISABLE);
         wps_set_status(WPS_STATUS_DISABLE);
         return ESP_FAIL;
     }
-
+    wpa_sm->wpa_sm_wps_disable = esp_wifi_wps_disable;
     return ESP_OK;
 }
 
 int wifi_wps_disable_internal(void)
 {
     wps_set_status(WPS_STATUS_DISABLE);
+
+    /* Call wps_delete_timer to delete all WPS timer, no timer will call wps_post()
+     * to post message to wps_task once this function returns.
+     */
+    wps_delete_timer();
     wifi_station_wps_deinit();
     return ESP_OK;
 }
@@ -1860,8 +1977,11 @@ int wifi_wps_disable_internal(void)
 int esp_wifi_wps_disable(void)
 {
     int ret = 0;
+    int wps_status;
+    struct wps_sm *wps_sm = gWpsSm;
+    struct wpa_sm *wpa_sm = &gWpaSm;
 
-    if (ESP_OK != wps_check_wifi_mode()) {
+    if (wps_sm && os_memcmp(wps_sm->identity, WSC_ID_REGISTRAR, wps_sm->identity_len) == 0) {
         return ESP_ERR_WIFI_MODE;
     }
 
@@ -1873,13 +1993,9 @@ int esp_wifi_wps_disable(void)
         return ESP_OK;
     }
 
-    wpa_printf(MSG_INFO, "wifi_wps_disable\n");
+    wps_status = wps_get_status();
+    wpa_printf(MSG_INFO, "wifi_wps_disable");
     wps_set_type(WPS_TYPE_DISABLE); /* Notify WiFi task */
-
-    /* Call wps_delete_timer to delete all WPS timer, no timer will call wps_post()
-     * to post message to wps_task once this function returns.
-     */
-    wps_delete_timer();
 
 #ifdef USE_WPS_TASK
     ret = wps_post_block(SIG_WPS_DISABLE, 0);
@@ -1891,11 +2007,15 @@ int esp_wifi_wps_disable(void)
         wpa_printf(MSG_ERROR, "wps disable: failed to disable wps, ret=%d", ret);
     }
 
-    esp_wifi_disconnect();
+    /* Only disconnect in case of WPS pending/done */
+    if ((wps_status == WPS_STATUS_PENDING) || (wps_status == WPS_STATUS_SUCCESS)) {
+        esp_wifi_disconnect();
+    }
     esp_wifi_set_wps_start_flag_internal(false);
     wps_task_deinit();
     s_wps_enabled = false;
     API_MUTEX_GIVE();
+    wpa_sm->wpa_sm_wps_disable = NULL;
     return ESP_OK;
 }
 

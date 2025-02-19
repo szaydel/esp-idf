@@ -1,28 +1,32 @@
 /*
- * SPDX-FileCopyrightText: 2021-2022 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2021-2024 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: CC0-1.0
  */
 
 #include <math.h>
+#include "sdkconfig.h"
 #include "lvgl.h"
 
 #ifndef PI
 #define PI  (3.14159f)
 #endif
 
+#if CONFIG_EXAMPLE_LCD_IMAGE_FROM_EMBEDDED_BINARY
 // LVGL image declare
 LV_IMG_DECLARE(esp_logo)
 LV_IMG_DECLARE(esp_text)
+#endif // CONFIG_EXAMPLE_LCD_IMAGE_FROM_EMBEDDED_BINARY
 
 typedef struct {
     lv_obj_t *scr;
     int count_val;
 } my_timer_context_t;
 
+static my_timer_context_t my_tim_ctx;
 static lv_obj_t *arc[3];
-static lv_obj_t *img_logo;
-static lv_obj_t *img_text;
+static lv_obj_t *img_logo = NULL;
+static lv_obj_t *img_text = NULL;
 static lv_color_t arc_color[] = {
     LV_COLOR_MAKE(232, 87, 116),
     LV_COLOR_MAKE(126, 87, 162),
@@ -31,7 +35,7 @@ static lv_color_t arc_color[] = {
 
 static void anim_timer_cb(lv_timer_t *timer)
 {
-    my_timer_context_t *timer_ctx = (my_timer_context_t *) timer->user_data;
+    my_timer_context_t *timer_ctx = (my_timer_context_t *)lv_timer_get_user_data(timer);
     int count = timer_ctx->count_val;
     lv_obj_t *scr = timer_ctx->scr;
 
@@ -49,13 +53,17 @@ static void anim_timer_cb(lv_timer_t *timer)
     // Delete arcs when animation finished
     if (count == 90) {
         for (size_t i = 0; i < sizeof(arc) / sizeof(arc[0]); i++) {
-            lv_obj_del(arc[i]);
+            lv_obj_delete(arc[i]);
         }
 
         // Create new image and make it transparent
-        img_text = lv_img_create(scr);
-        lv_img_set_src(img_text, &esp_text);
-        lv_obj_set_style_img_opa(img_text, 0, 0);
+        img_text = lv_image_create(scr);
+#if CONFIG_EXAMPLE_LCD_IMAGE_FROM_FILE_SYSTEM
+        lv_image_set_src(img_text, "S:/spiffs/esp_text.png");
+#elif CONFIG_EXAMPLE_LCD_IMAGE_FROM_EMBEDDED_BINARY
+        lv_image_set_src(img_text, &esp_text);
+#endif
+        lv_obj_set_style_image_opa(img_text, 0, 0);
     }
 
     // Move images when arc animation finished
@@ -63,22 +71,20 @@ static void anim_timer_cb(lv_timer_t *timer)
         lv_coord_t offset = (sinf((count - 140) * 2.25f / 90.0f) + 1) * 20.0f;
         lv_obj_align(img_logo, LV_ALIGN_CENTER, 0, -offset);
         lv_obj_align(img_text, LV_ALIGN_CENTER, 0, 2 * offset);
-        lv_obj_set_style_img_opa(img_text, offset / 40.0f * 255, 0);
+        lv_obj_set_style_image_opa(img_text, offset / 40.0f * 255, 0);
     }
 
     // Delete timer when all animation finished
     if ((count += 5) == 220) {
-        lv_timer_del(timer);
+        lv_timer_delete(timer);
     } else {
         timer_ctx->count_val = count;
     }
 }
 
-void example_lvgl_demo_ui(lv_obj_t *scr)
+static void start_animation(lv_obj_t *scr)
 {
-    // Create image
-    img_logo = lv_img_create(scr);
-    lv_img_set_src(img_logo, &esp_logo);
+    // Align image
     lv_obj_center(img_logo);
 
     // Create arcs
@@ -99,10 +105,28 @@ void example_lvgl_demo_ui(lv_obj_t *scr)
         lv_obj_center(arc[i]);
     }
 
+    if (img_text) {
+        lv_obj_delete(img_text);
+        img_text = NULL;
+    }
+
     // Create timer for animation
-    static my_timer_context_t my_tim_ctx = {
-        .count_val = -90,
-    };
+    my_tim_ctx.count_val = -90;
     my_tim_ctx.scr = scr;
     lv_timer_create(anim_timer_cb, 20, &my_tim_ctx);
+}
+
+void example_lvgl_demo_ui(lv_disp_t *disp)
+{
+    lv_obj_t *scr = lv_display_get_screen_active(disp);
+
+    // Create image
+    img_logo = lv_image_create(scr);
+#if CONFIG_EXAMPLE_LCD_IMAGE_FROM_FILE_SYSTEM
+    lv_image_set_src(img_logo, "S:/spiffs/esp_logo.png");
+#elif CONFIG_EXAMPLE_LCD_IMAGE_FROM_EMBEDDED_BINARY
+    lv_image_set_src(img_logo, &esp_logo);
+#endif
+
+    start_animation(scr);
 }

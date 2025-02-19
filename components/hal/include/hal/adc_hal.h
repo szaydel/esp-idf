@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2021-2022 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2021-2024 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -10,12 +10,12 @@
 #include "soc/soc_caps.h"
 #include "hal/dma_types.h"
 #include "hal/adc_types.h"
-#include "hal/adc_ll.h"
 #include "hal/adc_hal_common.h"
-#include "esp_err.h"
+#if SOC_ADC_DMA_SUPPORTED
+#include "hal/adc_ll.h"
+#endif
 
 #if SOC_GDMA_SUPPORTED
-#include "soc/gdma_struct.h"
 #include "hal/gdma_ll.h"
 #endif
 
@@ -33,16 +33,9 @@
 extern "C" {
 #endif
 
-#if SOC_GDMA_SUPPORTED
-#define ADC_HAL_DMA_INTR_MASK                           GDMA_LL_EVENT_RX_SUC_EOF
-#elif CONFIG_IDF_TARGET_ESP32S2
-#define ADC_HAL_DMA_INTR_MASK                           SPI_LL_INTR_IN_SUC_EOF
-#else //CONFIG_IDF_TARGET_ESP32
-#define ADC_HAL_DMA_INTR_MASK                           BIT(9)
+#if CONFIG_IDF_TARGET_ESP32
+#define ADC_HAL_DMA_I2S_HOST    0
 #endif
-
-//For ADC module, each conversion contains 4 bytes
-#define ADC_HAL_DATA_LEN_PER_CONV 4
 
 /**
  * @brief Enum for DMA descriptor status
@@ -57,9 +50,8 @@ typedef enum adc_hal_dma_desc_status_t {
  * @brief Configuration of the HAL
  */
 typedef struct adc_hal_dma_config_t {
-    void                *dev;               ///< DMA peripheral address
-    uint32_t            desc_max_num;       ///< Number of the descriptors linked once
-    uint32_t            dma_chan;           ///< DMA channel to be used
+    uint32_t            eof_desc_num;       ///< Number of dma descriptors that is eof
+    uint32_t            eof_step;           ///< Number of linked descriptors that is one eof
     uint32_t            eof_num;            ///< Bytes between 2 in_suc_eof interrupts
 } adc_hal_dma_config_t;
 
@@ -75,32 +67,21 @@ typedef struct adc_hal_dma_ctx_t {
     dma_descriptor_t    *cur_desc_ptr;      ///< Pointer to the current descriptor
 
     /**< these need to be configured by `adc_hal_dma_config_t` via driver layer*/
-    void                *dev;               ///< DMA address
-    uint32_t            desc_max_num;       ///< Number of the descriptors linked once
-    uint32_t            dma_chan;           ///< DMA channel to be used
+    uint32_t            eof_desc_num;       ///< Number of dma descriptors that is eof
+    uint32_t            eof_step;           ///< Number of linked descriptors that is one eof
     uint32_t            eof_num;            ///< Words between 2 in_suc_eof interrupts
 } adc_hal_dma_ctx_t;
 
 typedef struct adc_hal_digi_ctrlr_cfg_t {
-    bool                        conv_limit_en;      //1: adc conversion will stop when `conv_limit_num` reaches. 0: won't stop. NOTE: esp32 should always be set to 1.
-    uint32_t                    conv_limit_num;     //see `conv_limit_en`
     uint32_t                    adc_pattern_len;    //total pattern item number, including ADC1 and ADC2
     adc_digi_pattern_config_t   *adc_pattern;       //pattern item
     uint32_t                    sample_freq_hz;     //ADC sample frequency
     adc_digi_convert_mode_t     conv_mode;          //controller work mode
     uint32_t                    bit_width;          //output data width
+    adc_continuous_clk_src_t    clk_src;            ///< Clock source
+    uint32_t                    clk_src_freq_hz;    ///< Clock source frequency in hz
 } adc_hal_digi_ctrlr_cfg_t;
 
-
-/*---------------------------------------------------------------
-                    Common setting
----------------------------------------------------------------*/
-/**
- * Set ADC module power management.
- *
- * @prarm manage Set ADC power status.
- */
-#define adc_hal_set_power_manage(manage) adc_ll_set_power_manage(manage)
 
 /*---------------------------------------------------------------
                     PWDET(Power detect) controller setting
@@ -121,20 +102,6 @@ typedef struct adc_hal_digi_ctrlr_cfg_t {
  */
 #define adc_hal_pwdet_get_cct() adc_ll_pwdet_get_cct()
 
-/**
- *  Enable/disable the output of ADCn's internal reference voltage to one of ADC2's channels.
- *
- *  This function routes the internal reference voltage of ADCn to one of
- *  ADC2's channels. This reference voltage can then be manually measured
- *  for calibration purposes.
- *
- *  @note  ESP32 only supports output of ADC2's internal reference voltage.
- *  @param[in]  adc ADC unit select
- *  @param[in]  channel ADC2 channel number
- *  @param[in]  en Enable/disable the reference voltage output
- */
-#define adc_hal_vref_output(adc, channel, en) adc_ll_vref_output(adc, channel, en)
-
 /*---------------------------------------------------------------
                     Digital controller setting
 ---------------------------------------------------------------*/
@@ -148,9 +115,8 @@ void adc_hal_digi_init(adc_hal_dma_ctx_t *hal);
 /**
  * Digital controller deinitialization.
  *
- * @param hal Context of the HAL
  */
-void adc_hal_digi_deinit(adc_hal_dma_ctx_t *hal);
+void adc_hal_digi_deinit(void);
 
 /**
  * @brief Initialize the hal context
@@ -164,91 +130,66 @@ void adc_hal_dma_ctx_config(adc_hal_dma_ctx_t *hal, const adc_hal_dma_config_t *
  * Setting the digital controller.
  *
  * @param hal    Context of the HAL
- * @param cfg    Pointer to digital controller paramter.
+ * @param cfg    Pointer to digital controller parameter.
  */
 void adc_hal_digi_controller_config(adc_hal_dma_ctx_t *hal, const adc_hal_digi_ctrlr_cfg_t *cfg);
 
 /**
- * @brief Start Conversion
+ * @brief Link DMA descriptor
  *
  * @param hal Context of the HAL
  * @param data_buf Pointer to the data buffer, the length should be multiple of ``desc_max_num`` and ``eof_num`` in ``adc_hal_dma_ctx_t``
  */
-void adc_hal_digi_start(adc_hal_dma_ctx_t *hal, uint8_t *data_buf);
-
-#if !SOC_GDMA_SUPPORTED
-/**
- * @brief Get the DMA descriptor that Hardware has finished processing.
- *
- * @param hal Context of the HAL
- *
- * @return DMA descriptor address
- */
-intptr_t adc_hal_get_desc_addr(adc_hal_dma_ctx_t *hal);
-
-/**
- * @brief Check the hardware interrupt event
- *
- * @param hal Context of the HAL
- * @param mask Event mask
- *
- * @return True: the event is triggered. False: the event is not triggered yet.
- */
-bool adc_hal_check_event(adc_hal_dma_ctx_t *hal, uint32_t mask);
-#endif
+void adc_hal_digi_dma_link(adc_hal_dma_ctx_t *hal, uint8_t *data_buf);
 
 /**
  * @brief Get the ADC reading result
  *
  * @param      hal           Context of the HAL
  * @param      eof_desc_addr The last descriptor that is finished by HW. Should be got from DMA
- * @param[out] cur_desc      The descriptor with ADC reading result (from the 1st one to the last one (``eof_desc_addr``))
+ * @param[out] buffer        ADC reading result buffer
+ * @param[out] len           ADC reading result len
  *
  * @return                   See ``adc_hal_dma_desc_status_t``
  */
-adc_hal_dma_desc_status_t adc_hal_get_reading_result(adc_hal_dma_ctx_t *hal, const intptr_t eof_desc_addr, dma_descriptor_t **cur_desc);
+adc_hal_dma_desc_status_t adc_hal_get_reading_result(adc_hal_dma_ctx_t *hal, const intptr_t eof_desc_addr, uint8_t **buffer, uint32_t *len);
 
 /**
- * @brief Clear interrupt
+ * @brief Enable or disable ADC digital controller
  *
- * @param hal  Context of the HAL
- * @param mask mask of the interrupt
+ * @param enable true to enable, false to disable
  */
-void adc_hal_digi_clr_intr(adc_hal_dma_ctx_t *hal, uint32_t mask);
+void adc_hal_digi_enable(bool enable);
 
 /**
- * @brief Enable interrupt
+ * @brief Enable pr disable output data to DMA from adc digital controller.
  *
- * @param hal  Context of the HAL
- * @param mask mask of the interrupt
+ * @param enable true to enable, false to disable
  */
-void adc_hal_digi_dis_intr(adc_hal_dma_ctx_t *hal, uint32_t mask);
+void adc_hal_digi_connect(bool enable);
 
 /**
- * @brief Stop conversion
- *
- * @param hal Context of the HAL
+ * @brief Reset adc digital controller.
  */
-void adc_hal_digi_stop(adc_hal_dma_ctx_t *hal);
+void adc_hal_digi_reset(void);
 
-
-/*---------------------------------------------------------------
-                    ADC Single Read
----------------------------------------------------------------*/
+#if ADC_LL_WORKAROUND_CLEAR_EOF_COUNTER
 /**
- * Start an ADC conversion and get the converted value.
- *
- * @note It may be block to wait conversion finish.
- *
- * @param      adc_n   ADC unit.
- * @param      channel ADC channel number.
- * @param[out] out_raw ADC converted result
- *
- * @return
- *      - ESP_OK:                The value is valid.
- *      - ESP_ERR_INVALID_STATE: The value is invalid.
+ * @brief Clear the ADC sample counter
  */
-esp_err_t adc_hal_convert(adc_unit_t adc_n, int channel, int *out_raw);
+void adc_hal_digi_clr_eof(void);
+#endif
+
+/**
+ * @brief Set ADC monitor with high and low thresholds, and will enable the interrupts accordingly
+ *
+ * @param monitor_id Monitor to configure
+ * @param adc_n Which ADC unit will be monitored
+ * @param adc_ch Which ADC channel will be monitored
+ * @param h_thres High threshold (disable if < 0)
+ * @param l_thres Low threshold (disable if < 0)
+ */
+void adc_hal_digi_monitor_set_thres(adc_monitor_id_t monitor_id, adc_unit_t adc_n, uint8_t adc_ch, int32_t h_thres, int32_t l_thres);
 
 #ifdef __cplusplus
 }

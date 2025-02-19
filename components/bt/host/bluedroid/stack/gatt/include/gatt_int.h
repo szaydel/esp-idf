@@ -78,7 +78,7 @@ typedef UINT8 tGATT_SEC_ACTION;
 
 /* wait for ATT cmd response timeout value */
 #define GATT_WAIT_FOR_RSP_TOUT       30
-#define GATT_WAIT_FOR_DISC_RSP_TOUT  5
+#define GATT_WAIT_FOR_DISC_RSP_TOUT  15
 #define GATT_REQ_RETRY_LIMIT         2
 #define GATT_WAIT_FOR_IND_ACK_TOUT   5
 
@@ -130,7 +130,7 @@ typedef union {
     tGATT_EXEC_FLAG         exec_write;    /* execute write */
 } tGATT_CL_MSG;
 
-/* error response strucutre */
+/* error response structure */
 typedef struct {
     UINT16  handle;
     UINT8   cmd_code;
@@ -405,6 +405,13 @@ typedef struct {
     UINT8           pending_cl_req;
     UINT8           next_slot_inq;    /* index of next available slot in queue */
 
+    /* client supported feature */
+    UINT8           cl_supp_feat;
+    /* server supported feature */
+    UINT8           sr_supp_feat;
+    /* if false, should handle database out of sync */
+    BOOLEAN         is_robust_cache_change_aware;
+
     BOOLEAN         in_use;
     UINT8           tcb_idx;
     tGATT_PREPARE_WRITE_RECORD prepare_write_record;    /* prepare write packets record */
@@ -473,12 +480,14 @@ typedef struct {
     UINT32      service_change;
 } tGATT_SVC_CHG;
 
+#if (tGATT_BG_CONN_DEV == TRUE)
 typedef struct {
     tGATT_IF        gatt_if[GATT_MAX_APPS];
     tGATT_IF        listen_gif[GATT_MAX_APPS];
     BD_ADDR         remote_bda;
     BOOLEAN         in_use;
 } tGATT_BG_CONN_DEV;
+#endif // #if (tGATT_BG_CONN_DEV == TRUE)
 
 #define GATT_SVC_CHANGED_CONNECTING        1   /* wait for connection */
 #define GATT_SVC_CHANGED_SERVICE           2   /* GATT service discovery */
@@ -532,14 +541,26 @@ typedef struct {
     tGATT_PROFILE_CLCB  profile_clcb[GATT_MAX_APPS];
 #endif  ///GATTS_INCLUDED == TRUE
     UINT16              handle_of_h_r;          /* Handle of the handles reused characteristic value */
+#if GATTS_ROBUST_CACHING_ENABLED
+    UINT16              handle_of_database_hash;
+    UINT16              handle_of_cl_supported_feat;
+    UINT16              handle_of_sr_supported_feat;
+    BT_OCTET16          database_hash;
+    UINT8               gatt_sr_supported_feat_mask;
+    UINT8               gatt_cl_supported_feat_mask;
 
+#endif
     tGATT_APPL_INFO       cb_info;
 
 
 
     tGATT_HDL_CFG           hdl_cfg;
+#if (tGATT_BG_CONN_DEV == TRUE)
     tGATT_BG_CONN_DEV       bgconn_dev[GATT_MAX_BG_CONN_DEV];
-
+#endif // #if (tGATT_BG_CONN_DEV == TRUE)
+    BOOLEAN             auto_disc;      /* internal use: true for auto discovering after connected */
+    UINT8               srv_chg_mode;   /* internal use: service change mode */
+    tGATTS_RSP          rsp;            /* use to read internal service attribute */
 } tGATT_CB;
 
 typedef struct{
@@ -609,6 +630,7 @@ extern BOOLEAN gatt_parse_uuid_from_cmd(tBT_UUID *p_uuid, UINT16 len, UINT8 **p_
 extern UINT8 gatt_build_uuid_to_stream(UINT8 **p_dst, tBT_UUID uuid);
 extern BOOLEAN gatt_uuid_compare(tBT_UUID src, tBT_UUID tar);
 extern void gatt_convert_uuid32_to_uuid128(UINT8 uuid_128[LEN_UUID_128], UINT32 uuid_32);
+extern char *gatt_uuid_to_str(const tBT_UUID *uuid);
 extern void gatt_sr_get_sec_info(BD_ADDR rem_bda, tBT_TRANSPORT transport, UINT8 *p_sec_flag, UINT8 *p_key_size);
 extern void gatt_start_rsp_timer(UINT16 clcb_idx);
 extern void gatt_start_conf_timer(tGATT_TCB    *p_tcb);
@@ -648,6 +670,7 @@ extern BOOLEAN gatt_add_an_item_to_list(tGATT_HDL_LIST_INFO *p_list, tGATT_HDL_L
 extern BOOLEAN gatt_remove_an_item_from_list(tGATT_HDL_LIST_INFO *p_list, tGATT_HDL_LIST_ELEM *p_remove);
 extern tGATTS_SRV_CHG *gatt_add_srv_chg_clt(tGATTS_SRV_CHG *p_srv_chg);
 
+#if (tGATT_BG_CONN_DEV == TRUE)
 /* for background connection */
 extern BOOLEAN gatt_update_auto_connect_dev (tGATT_IF gatt_if, BOOLEAN add, BD_ADDR bd_addr, BOOLEAN is_initiator);
 extern BOOLEAN gatt_is_bg_dev_for_app(tGATT_BG_CONN_DEV *p_dev, tGATT_IF gatt_if);
@@ -657,6 +680,7 @@ extern BOOLEAN gatt_find_app_for_bg_dev(BD_ADDR bd_addr, tGATT_IF *p_gatt_if);
 extern tGATT_BG_CONN_DEV *gatt_find_bg_dev(BD_ADDR remote_bda);
 extern void gatt_deregister_bgdev_list(tGATT_IF gatt_if);
 extern void gatt_reset_bgdev_list(void);
+#endif // #if (tGATT_BG_CONN_DEV == TRUE)
 
 /* server function */
 extern UINT8 gatt_sr_find_i_rcb_by_handle(UINT16 handle);
@@ -737,7 +761,7 @@ extern UINT16 gatts_add_char_descr (tGATT_SVC_DB *p_db, tGATT_PERM perm,
 
 extern tGATT_STATUS gatts_set_attribute_value(tGATT_SVC_DB *p_db, UINT16 attr_handle,
                                     UINT16 length, UINT8 *value);
-
+extern tGATT_STATUS gatts_get_attr_value_internal(UINT16 attr_handle, UINT16 *length, UINT8 **value);
 extern tGATT_STATUS gatts_get_attribute_value(tGATT_SVC_DB *p_db, UINT16 attr_handle,
                                     UINT16 *length, UINT8 **value);
 extern BOOLEAN gatts_is_auto_response(UINT16 attr_handle);
@@ -754,7 +778,16 @@ extern tGATT_STATUS gatts_read_attr_perm_check(tGATT_SVC_DB *p_db, BOOLEAN is_lo
 extern void gatts_update_srv_list_elem(UINT8 i_sreg, UINT16 handle, BOOLEAN is_primary);
 extern tBT_UUID *gatts_get_service_uuid (tGATT_SVC_DB *p_db);
 
+extern BOOLEAN gatt_check_connection_state_by_tcb(tGATT_TCB *p_tcb);
+
 extern void gatt_reset_bgdev_list(void);
 extern uint16_t gatt_get_local_mtu(void);
 extern void gatt_set_local_mtu(uint16_t mtu);
+
+extern tGATT_STATUS gatts_calculate_datebase_hash(BT_OCTET16 hash);
+extern void gatts_show_local_database(void);
+
+extern BOOLEAN gatt_sr_is_cl_change_aware(tGATT_TCB *p_tcb);
+extern void gatt_sr_init_cl_status(tGATT_TCB *p_tcb);
+extern void gatt_sr_update_cl_status(tGATT_TCB *tcb, BOOLEAN chg_aware);
 #endif
