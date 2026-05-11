@@ -56,6 +56,7 @@ static const char *TAG="httpd_ws";
 
 /* RFC 6455 §7.4 close status codes used for protocol-error Close frames */
 #define HTTPD_WS_CLOSE_CODE_PROTOCOL_ERROR 1002U
+#define HTTPD_WS_CLOSE_CODE_INVALID_UTF8  1007U
 #define HTTPD_WS_CLOSE_CODE_TOO_BIG       1009U
 
 /*
@@ -370,6 +371,16 @@ static inline void httpd_ws_mark_closing(struct httpd_req_aux *aux)
     aux->ws_type = HTTPD_WS_TYPE_CLOSE;
 }
 
+/* Record that this endpoint has put its own CLOSE frame on the wire. Called from
+ * the single send path, so an application that replies to a CLOSE itself is
+ * tracked as well. */
+static inline void httpd_ws_mark_close_sent(struct sock_db *sess, httpd_ws_type_t type)
+{
+    if (type == HTTPD_WS_TYPE_CLOSE) {
+        sess->ws_close_sent = true;
+    }
+}
+
 /* Send a Close frame with the given status code and mark the session as closing.
  * Always returns ESP_FAIL so callers can write: return httpd_ws_fail_connection(...).
  * RFC 6455 §7.1.7
@@ -388,10 +399,10 @@ static esp_err_t httpd_ws_fail_connection(httpd_req_t *req, uint16_t close_code)
 
     httpd_ws_mark_closing(aux);
 
-    bool already_closing = aux->sd->ws_close;
+    bool close_already_sent = aux->sd->ws_close_sent;
     aux->sd->ws_close = true;
 
-    if (aux->sd->ws_handshake_done && !already_closing) {
+    if (aux->sd->ws_handshake_done && !close_already_sent) {
         uint8_t close_payload[2] = {
             (uint8_t)(close_code >> 8U),
             (uint8_t)(close_code & 0xffU),
@@ -411,6 +422,86 @@ static esp_err_t httpd_ws_fail_connection(httpd_req_t *req, uint16_t close_code)
 
     return ret;
 }
+
+esp_err_t httpd_ws_validate_utf8(const uint8_t *data, size_t len)
+{
+    if (data == NULL && len != 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    size_t idx = 0;
+    while (idx < len) {
+        uint8_t c = data[idx++];
+        if (c <= 0x7F) {
+            continue;
+        }
+        uint8_t trail = 0;
+        uint8_t lo = 0x80, hi = 0xBF;
+        if (c >= 0xC2 && c <= 0xDF) {
+            trail = 1;
+        } else if (c == 0xE0) {
+            trail = 2;
+            lo = 0xA0;
+        } else if (c == 0xED) {
+            trail = 2;
+            hi = 0x9F;
+        } else if (c >= 0xE1 && c <= 0xEF) {
+            trail = 2;
+        } else if (c == 0xF0) {
+            trail = 3;
+            lo = 0x90;
+        } else if (c == 0xF4) {
+            trail = 3;
+            hi = 0x8F;
+        } else if (c >= 0xF1 && c <= 0xF3) {
+            trail = 3;
+        } else {
+            return ESP_ERR_INVALID_ARG;
+        }
+        for (uint8_t i = 0; i < trail; i++) {
+            if (idx >= len || data[idx] < lo || data[idx] > hi) {
+                return ESP_ERR_INVALID_ARG;
+            }
+            idx++;
+            lo = 0x80;
+            hi = 0xBF;
+        }
+    }
+    return ESP_OK;
+}
+
+static bool httpd_ws_is_valid_close_code(uint16_t code)
+{
+    if (code >= 1000 && code <= 1014 && code != 1004 && code != 1005 && code != 1006) {
+        return true;
+    }
+    return code >= 3000 && code <= 4999;
+}
+
+/* Validates the payload of a CLOSE frame (RFC 6455 §5.5.1 / §7.4 / §8.1). */
+static esp_err_t httpd_ws_validate_close_frame(httpd_req_t *req, const httpd_ws_frame_t *frame)
+{
+    if (frame->type != HTTPD_WS_TYPE_CLOSE) {
+        return ESP_OK;
+    }
+    /* A one-byte body is never valid. */
+    if (frame->len == 1) {
+        ESP_LOGE(TAG, LOG_FMT("Invalid CLOSE frame payload length"));
+        return httpd_ws_fail_connection(req, HTTPD_WS_CLOSE_CODE_PROTOCOL_ERROR);
+    }
+    if (frame->len >= 2) {
+        uint16_t close_code = ((uint16_t)frame->payload[0] << 8U) | frame->payload[1];
+        if (!httpd_ws_is_valid_close_code(close_code)) {
+            ESP_LOGE(TAG, LOG_FMT("Invalid CLOSE frame code: %u"), close_code);
+            return httpd_ws_fail_connection(req, HTTPD_WS_CLOSE_CODE_PROTOCOL_ERROR);
+        }
+        if (frame->len > 2 && httpd_ws_validate_utf8(frame->payload + 2, frame->len - 2) != ESP_OK) {
+            ESP_LOGE(TAG, LOG_FMT("Invalid CLOSE frame UTF-8 reason"));
+            return httpd_ws_fail_connection(req, HTTPD_WS_CLOSE_CODE_INVALID_UTF8);
+        }
+    }
+    return ESP_OK;
+}
+#endif /* CONFIG_HTTPD_WS_STRICTER_RFC6455 */
 
 static esp_err_t httpd_ws_unmask_payload(uint8_t *payload, size_t len, const uint8_t *mask_key, size_t mask_offset)
 {
@@ -598,6 +689,20 @@ static esp_err_t httpd_ws_recv_frame_internal(httpd_req_t *req, httpd_ws_frame_t
     /* Unmask payload */
     httpd_ws_unmask_payload(frame->payload, offset, aux->mask_key, mask_offset);
 
+#if CONFIG_HTTPD_WS_STRICTER_RFC6455
+    /* Validate complete frames (left_len == 0 and all bytes unmasked). */
+    if (frame->left_len == 0 && offset == frame->len) {
+        /* RFC 6455 §8.1: text frames must carry valid UTF-8. */
+        if (frame->type == HTTPD_WS_TYPE_TEXT && frame->final &&
+            httpd_ws_validate_utf8(frame->payload, frame->len) != ESP_OK) {
+            ESP_LOGE(TAG, LOG_FMT("Invalid WS text payload UTF-8"));
+            return httpd_ws_fail_connection(req, HTTPD_WS_CLOSE_CODE_INVALID_UTF8);
+        }
+        /* Validate CLOSE frame payload and UTF-8 reason (Issues 16, 19). */
+        return httpd_ws_validate_close_frame(req, frame);
+    }
+#endif /* CONFIG_HTTPD_WS_STRICTER_RFC6455 */
+
     return ESP_OK;
 }
 
@@ -672,6 +777,22 @@ esp_err_t httpd_ws_send_frame_async(httpd_handle_t hd, int fd, httpd_ws_frame_t 
     /* WebSocket server does not required to mask response payload, so leave the MASK bit as 0. */
     header_buf[1] &= (~HTTPD_WS_MASK_BIT);
 
+    /* Send a short frame as a single write. A CLOSE reply is followed at once by
+     * the socket teardown, and if unread request data is still pending the stack
+     * aborts the connection with an RST. That RST can discard a second, separate
+     * write, so the peer sees a header that promises a payload it never gets. */
+    if (frame->len > 0 && frame->payload != NULL && frame->len <= HTTPD_WS_CONTROL_PAYLOAD_MAX) {
+        uint8_t frame_out[sizeof(header_buf) + HTTPD_WS_CONTROL_PAYLOAD_MAX];
+        memcpy(frame_out, header_buf, tx_len);
+        memcpy(frame_out + tx_len, frame->payload, frame->len);
+        if (sess->send_fn(hd, fd, (const char *)frame_out, tx_len + frame->len, 0) < 0) {
+            ESP_LOGW(TAG, LOG_FMT("Failed to send WS frame"));
+            return ESP_FAIL;
+        }
+        httpd_ws_mark_close_sent(sess, frame->type);
+        return ESP_OK;
+    }
+
     /* Send off header */
     if (sess->send_fn(hd, fd, (const char *)header_buf, tx_len, 0) < 0) {
         ESP_LOGW(TAG, LOG_FMT("Failed to send WS header"));
@@ -686,6 +807,7 @@ esp_err_t httpd_ws_send_frame_async(httpd_handle_t hd, int fd, httpd_ws_frame_t 
         }
     }
 
+    httpd_ws_mark_close_sent(sess, frame->type);
     return ESP_OK;
 }
 
@@ -713,10 +835,14 @@ esp_err_t httpd_ws_reply_to_control_frame(httpd_req_t *req, httpd_ws_frame_t *fr
         frame->type = HTTPD_WS_TYPE_PONG;
         return httpd_ws_send_frame(req, frame);
     case HTTPD_WS_TYPE_CLOSE:
-        /* Reply to a CLOSE with an empty CLOSE (RFC 6455 §5.5.1) */
+        /* Reply to a CLOSE with a CLOSE (RFC 6455 §5.5.1). Strict mode echoes the
+         * received status code and reason, as §5.5.1 recommends. Lenient
+         * (pre-strict) behavior replies with an empty CLOSE. */
         ESP_LOGD(TAG, LOG_FMT("Got a WS CLOSE frame, Replying CLOSE..."));
+#if !CONFIG_HTTPD_WS_STRICTER_RFC6455
         frame->len = 0;
         frame->payload = NULL;
+#endif /* !CONFIG_HTTPD_WS_STRICTER_RFC6455 */
         return httpd_ws_send_frame(req, frame);
     default:
         /* PONG and any other control frame require no reply */

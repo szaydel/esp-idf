@@ -139,6 +139,20 @@ To use the WebSocket post-handshake callback, you must enable :menuitem:`CONFIG_
     httpd_register_uri_handler(server, &ws);
 
 
+WebSocket Message Fragmentation
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The server does not support fragmented WebSocket messages, as `RFC 6455, section 5.4 <https://tools.ietf.org/html/rfc6455#section-5.4>`_ defines them. An application that must accept or send fragments must apply the rules below itself.
+
+On receive, the server passes each frame to the handler on its own. It does not join the fragments of one message. A handler that gets a TEXT message in three fragments sees three separate frames. Use the ``final`` and ``fragmented`` fields of :cpp:type:`httpd_ws_frame_t` to detect a fragment, and join the payloads in the application.
+
+The server does not validate the fragment sequence. It accepts a CONTINUE frame that continues no message. It also accepts a new TEXT or BINARY frame while a fragmented message is still open. RFC 6455 requires a close with status code 1002 in both cases.
+
+:menuitem:`CONFIG_HTTPD_WS_STRICTER_RFC6455` validates the UTF-8 of a complete, unfragmented TEXT frame only. It does not validate a TEXT message that arrives in fragments. To enforce `RFC 6455, section 8.1 <https://tools.ietf.org/html/rfc6455#section-8.1>`_ on such a message, join the fragments and call :cpp:func:`httpd_ws_validate_utf8` on the result.
+
+On transmit, the server does not fragment a message automatically. To send fragments, set the ``fragmented`` option and mark the last fragment with the ``final`` option.
+
+
 WebSocket Control Frame Handler
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

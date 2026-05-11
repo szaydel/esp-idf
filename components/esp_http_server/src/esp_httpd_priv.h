@@ -87,6 +87,7 @@ struct sock_db {
 #ifdef CONFIG_HTTPD_WS_SUPPORT
     bool ws_handshake_done;                 /*!< True if it has done WebSocket handshake (if this socket is a valid WS) */
     bool ws_close;                          /*!< Set to true to close the socket later (when WS Close frame received) */
+    bool ws_close_sent;                     /*!< Set to true once this endpoint has sent its own WS Close frame */
     esp_err_t (*ws_handler)(httpd_req_t *r);   /*!< WebSocket handler, leave to null if it's not WebSocket */
     bool ws_control_frames;                         /*!< WebSocket flag indicating that control frames should be passed to user handlers */
     esp_err_t (*ws_control_handler)(httpd_req_t *r, const httpd_ws_frame_t *frame); /*!< Dedicated WebSocket control-frame handler, NULL if not used */

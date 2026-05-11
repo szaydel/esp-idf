@@ -1857,6 +1857,13 @@ typedef void (*transfer_complete_cb)(esp_err_t err, int socket, void *arg);
  *
  * @note    Calling httpd_ws_recv_frame() with max_len as 0 will give actual frame size in pkt->len.
  *          The user can dynamically allocate space for pkt->payload as per this length and call httpd_ws_recv_frame() again to get the actual data.
+ *
+ * @note    Fragmented messages (RFC 6455 §5.4) are not supported. Each frame is
+ *          returned on its own; the library never joins the fragments of one
+ *          message, and it does not validate the fragment sequence. Read pkt->final
+ *          and pkt->type to detect a fragment, and join the payloads in the
+ *          application. UTF-8 validation of a TEXT message that arrives in
+ *          fragments is the caller's responsibility; see httpd_ws_validate_utf8().
  *          Please refer to the corresponding example for usage.
  *
  * @param[in]   req         Current request
@@ -1878,6 +1885,13 @@ esp_err_t httpd_ws_recv_frame(httpd_req_t *req, httpd_ws_frame_t *pkt, size_t ma
  *          The user can dynamically allocate space for pkt->payload or user defined chunk size and call httpd_ws_recv_frame_part() again to get the actual data.
  *          In contrast to httpd_ws_recv_frame, this method is able to read frame payload partially. The amount of data that is yet to be received is stored in pkt->left_len
  *
+ * @note    UTF-8 validation required by RFC 6455 §8.1 for TEXT frames is only
+ *          performed by the library when a whole frame is consumed in a single
+ *          call (which includes a httpd_ws_recv_frame_part() call whose max_len
+ *          covers the entire payload). Callers that assemble a TEXT payload
+ *          across multiple calls are responsible for validating the assembled
+ *          buffer themselves; see httpd_ws_validate_utf8().
+ *
  * @param[in]   req         Current request
  * @param[out]  pkt         WebSocket packet
  * @param[in]   max_len     Maximum length for receive
@@ -1888,6 +1902,22 @@ esp_err_t httpd_ws_recv_frame(httpd_req_t *req, httpd_ws_frame_t *pkt, size_t ma
  *  - ESP_ERR_INVALID_ARG       : Argument is invalid (null or non-WebSocket)
  */
 esp_err_t httpd_ws_recv_frame_part(httpd_req_t *req, httpd_ws_frame_t *pkt, size_t max_len);
+
+/**
+ * @brief Validate that a byte buffer is well-formed UTF-8 per RFC 3629.
+ *
+ * Intended for application code that assembles a WebSocket TEXT message
+ * across multiple httpd_ws_recv_frame_part() calls and needs to enforce
+ * RFC 6455 §8.1 on the assembled payload before processing it.
+ *
+ * @param[in] data Pointer to the buffer to validate. May be NULL only if len is 0.
+ * @param[in] len  Length of the buffer in bytes.
+ * @return
+ *  - ESP_OK                : Buffer is valid UTF-8 (an empty buffer is always valid).
+ *  - ESP_ERR_INVALID_ARG   : data is NULL with non-zero len, or the buffer is not
+ *                            well-formed UTF-8 (overlong, surrogate, or beyond U+10FFFF).
+ */
+esp_err_t httpd_ws_validate_utf8(const uint8_t *data, size_t len);
 
 /**
  * @brief Construct and send a WebSocket frame
