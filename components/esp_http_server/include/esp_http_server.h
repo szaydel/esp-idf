@@ -1990,6 +1990,33 @@ esp_err_t httpd_ws_send_data(httpd_handle_t handle, int socket, httpd_ws_frame_t
 esp_err_t httpd_ws_send_data_async(httpd_handle_t handle, int socket, httpd_ws_frame_t *frame,
                                    transfer_complete_cb callback, void *arg);
 
+/**
+ * @brief Initiate a graceful WebSocket close handshake on a session.
+ *
+ * Sends a CLOSE frame with the given status code and optional UTF-8 reason,
+ * marks the session as closing (which blocks any further outbound data
+ * frames per RFC 6455 §1.4), and lets the underlying TCP socket be torn
+ * down at the next dispatch boundary. The call is idempotent: if the
+ * session was already closing it returns ESP_OK without emitting a second
+ * CLOSE frame, and the code and reason arguments are not validated.
+ *
+ * @param[in] hd     Server handle.
+ * @param[in] fd     Socket descriptor of the session to close.
+ * @param[in] code   Status code per RFC 6455 §7.4 (e.g., 1000 for normal
+ *                   closure). Reserved codes (1005, 1006) and out-of-range
+ *                   values are rejected.
+ * @param[in] reason Optional NUL-terminated UTF-8 reason, or NULL. Must be
+ *                   at most 123 bytes so the total control frame payload
+ *                   (2-byte code + reason) fits in 125 bytes.
+ * @return
+ *  - ESP_OK                : CLOSE sent (or session was already closing).
+ *  - ESP_ERR_INVALID_ARG   : Invalid fd, invalid code, reason exceeds 123 bytes,
+ *                            or reason is not valid UTF-8.
+ *  - ESP_ERR_INVALID_STATE : Socket is not an established WebSocket session.
+ *  - ESP_FAIL              : Underlying transport send failed.
+ */
+esp_err_t httpd_ws_close_session(httpd_handle_t hd, int fd, uint16_t code, const char *reason);
+
 #endif /* CONFIG_HTTPD_WS_SUPPORT || __DOXYGEN__ */
 /** End of WebSocket related stuff
  * @}
