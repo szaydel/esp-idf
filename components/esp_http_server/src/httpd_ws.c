@@ -673,6 +673,9 @@ static esp_err_t httpd_ws_recv_frame_internal(httpd_req_t *req, httpd_ws_frame_t
         /* When reading entire packet at once, we only accept the incoming packet length that is smaller than the max_len (or it will overflow the buffer!) */
         if (!partial) {
             ESP_LOGW(TAG, LOG_FMT("WS Message too long"));
+            /* The payload is still queued in the socket. Fail the connection
+             * (RFC 6455 §7.4.1, close code 1009) so the session is torn down. */
+            httpd_ws_fail_connection(req, HTTPD_WS_CLOSE_CODE_TOO_BIG);
             return ESP_ERR_INVALID_SIZE;
         }
         ESP_LOGD(TAG, LOG_FMT("WS Message too long. User will have to call read again"));

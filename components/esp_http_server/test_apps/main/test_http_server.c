@@ -1072,6 +1072,35 @@ TEST_CASE("WS auto CLOSE reply echoes received payload", "[HTTP SERVER][websocke
     TEST_ASSERT_EQUAL_UINT8_ARRAY(expected_reply, ws_send_capture_ctx.data, sizeof(expected_reply));
 }
 
+TEST_CASE("WS recv oversized frame fails connection with CLOSE 1009", "[HTTP SERVER][websocket]")
+{
+    /* A masked TEXT frame with a 4-byte payload, read with max_len = 2. The frame
+     * does not fit, and the payload is still queued in the socket. The library
+     * must fail the connection (CLOSE 1009). The scripted stream carries a second TEXT frame
+     * after the payload to represent that queued data. */
+    static const uint8_t ws_frame[] = {
+        0x84, 0x00, 0x00, 0x00, 0x00, 'd', 'a', 't', 'a',   /* first frame, len 4, zero mask */
+        0x81, 0x80, 0x00, 0x00, 0x00, 0x00                  /* a second frame that must never be read */
+    };
+    struct httpd_data hd = {0};
+    httpd_req_t req = {0};
+    struct httpd_req_aux aux = {0};
+    struct sock_db session = {0};
+    httpd_ws_frame_t frame = {0};
+
+    ws_setup_recv_fixture(&hd, &req, &aux, &session, ws_frame, sizeof(ws_frame));
+    aux.ws_type = HTTPD_WS_TYPE_TEXT;
+    aux.ws_final = true;
+
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_SIZE, httpd_ws_recv_frame(&req, &frame, 2));
+    ws_assert_close_sent(&session, 1009);
+
+    /* The library must fail, not drain: only the length byte and the 4 mask
+     * bytes are consumed. The 4 payload bytes and the whole second frame stay
+     * unread. */
+    TEST_ASSERT_EQUAL(5, ws_scripted_recv_ctx.offset);
+}
+
 TEST_CASE("WS recv rejects CLOSE frame with 1-byte payload", "[HTTP SERVER][websocket]")
 {
     /* CLOSE with 1-byte body — always invalid */
