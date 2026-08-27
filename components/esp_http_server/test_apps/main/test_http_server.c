@@ -623,13 +623,29 @@ static esp_err_t ws_data_handler_spy(httpd_req_t *req)
     return ESP_OK;
 }
 
-static esp_err_t ws_control_handler_spy(httpd_req_t *req, const httpd_ws_frame_t *frame)
+/* Mirrors what an application does: the control handler owns the protocol reply.
+ * On a handler failure nothing is sent, because no other code replies for it. */
+static esp_err_t ws_control_handler_spy(httpd_req_t *req, httpd_ws_frame_t *frame)
 {
-    (void)req;
     s_ws_control_handler_calls++;
     s_ws_control_seen_type = frame->type;
     s_ws_control_seen_len = frame->len;
-    return s_ws_control_ret;
+    if (s_ws_control_ret != ESP_OK) {
+        return s_ws_control_ret;
+    }
+
+    switch (frame->type) {
+    case HTTPD_WS_TYPE_PING:
+        frame->type = HTTPD_WS_TYPE_PONG;
+        return httpd_ws_send_frame(req, frame);
+    case HTTPD_WS_TYPE_CLOSE:
+        frame->len = 0;
+        frame->payload = NULL;
+        return httpd_ws_send_frame(req, frame);
+    default:
+        /* A PONG needs no reply */
+        return ESP_OK;
+    }
 }
 
 /* Wire a fake session/server and reset all fixtures around a single frame. */
@@ -1335,7 +1351,7 @@ TEST_CASE("WS send uses 16-bit length encoding for exactly 65535-byte payload", 
     TEST_ASSERT_EQUAL_UINT8_ARRAY(expected_header, ws_send_capture_ctx.data, sizeof(expected_header));
 }
 
-TEST_CASE("WS control handler receives PING and server replies PONG", "[HTTP SERVER][websocket]")
+TEST_CASE("WS control handler owns the PONG reply for PING", "[HTTP SERVER][websocket]")
 {
     /* Masked (zero-key) PING carrying a 2-byte payload "Hi". */
     static const uint8_t ping_frame[] = { 0x89, 0x82, 0x00, 0x00, 0x00, 0x00, 'H', 'i' };
@@ -1353,13 +1369,13 @@ TEST_CASE("WS control handler receives PING and server replies PONG", "[HTTP SER
     TEST_ASSERT_EQUAL(2, s_ws_control_seen_len);
     TEST_ASSERT_EQUAL(0, s_ws_data_handler_calls);   /* control frame must not reach data handler */
     TEST_ASSERT_GREATER_THAN(0, s_ws_sent_len);
-    TEST_ASSERT_EQUAL_HEX8(0x8A, s_ws_sent[0]);      /* FIN | PONG */
+    TEST_ASSERT_EQUAL_HEX8(0x8A, s_ws_sent[0]);      /* FIN | PONG, sent by the handler */
     TEST_ASSERT_FALSE(session.ws_close);
 
     free(hd.hd_req_aux.resp_hdrs);
 }
 
-TEST_CASE("WS control handler receives CLOSE and server replies CLOSE", "[HTTP SERVER][websocket]")
+TEST_CASE("WS control handler owns the CLOSE reply for CLOSE", "[HTTP SERVER][websocket]")
 {
     static const uint8_t close_frame[] = { 0x88, 0x80, 0x00, 0x00, 0x00, 0x00 };
     struct httpd_data hd = {0};
@@ -1375,7 +1391,7 @@ TEST_CASE("WS control handler receives CLOSE and server replies CLOSE", "[HTTP S
     TEST_ASSERT_EQUAL(HTTPD_WS_TYPE_CLOSE, s_ws_control_seen_type);
     TEST_ASSERT_EQUAL(0, s_ws_data_handler_calls);
     TEST_ASSERT_GREATER_THAN(0, s_ws_sent_len);
-    TEST_ASSERT_EQUAL_HEX8(0x88, s_ws_sent[0]);      /* FIN | CLOSE */
+    TEST_ASSERT_EQUAL_HEX8(0x88, s_ws_sent[0]);      /* FIN | CLOSE, sent by the handler */
     TEST_ASSERT_TRUE(session.ws_close);              /* server marked the session for close */
 
     free(hd.hd_req_aux.resp_hdrs);
@@ -1424,11 +1440,12 @@ TEST_CASE("WS without control handler auto-replies PING (backward compatible)", 
     free(hd.hd_req_aux.resp_hdrs);
 }
 
-TEST_CASE("WS control handler error still replies then closes socket", "[HTTP SERVER][websocket]")
+TEST_CASE("WS control handler error sends no reply and closes socket", "[HTTP SERVER][websocket]")
 {
     /* A PING is used so ws_close stays false and cleanup does not touch the fake
-     * control socket. The handler fails, but the server must still send the PONG,
-     * and httpd_req_new() must propagate the error so the caller closes the socket. */
+     * control socket. The handler owns the reply, so a handler failure puts nothing
+     * on the wire, and httpd_req_new() propagates the error so the caller closes
+     * the socket. */
     static const uint8_t ping_frame[] = { 0x89, 0x80, 0x00, 0x00, 0x00, 0x00 };
     struct httpd_data hd = {0};
     struct sock_db session = {0};
@@ -1441,8 +1458,7 @@ TEST_CASE("WS control handler error still replies then closes socket", "[HTTP SE
 
     TEST_ASSERT_EQUAL(ESP_FAIL, ret);                /* error propagated to caller */
     TEST_ASSERT_EQUAL(1, s_ws_control_handler_calls);
-    TEST_ASSERT_GREATER_THAN(0, s_ws_sent_len);
-    TEST_ASSERT_EQUAL_HEX8(0x8A, s_ws_sent[0]);      /* reply sent despite handler error */
+    TEST_ASSERT_EQUAL(0, s_ws_sent_len);             /* no reply: the handler owns it */
 
     free(hd.hd_req_aux.resp_hdrs);
 }

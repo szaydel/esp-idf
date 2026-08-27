@@ -493,18 +493,29 @@ typedef struct httpd_uri {
      * Optional dedicated handler for WebSocket control frames (PING, PONG, CLOSE).
      *
      * Only takes effect when handle_ws_control_frames is true. When set, control
-     * frames are delivered to this handler instead of the data handler. The server
-     * has already received the frame (passed via the read-only frame argument), and
-     * after this handler returns the server performs the protocol reply itself
-     * (PONG for PING, CLOSE for CLOSE). The frame and its payload are owned by the
-     * server and are only valid for the duration of the call; the handler must not
-     * free or retain them. If left NULL, control frames continue to be delivered to
-     * the data handler (unchanged behavior).
+     * frames are delivered to this handler instead of the data handler, so the data
+     * handler only ever sees data frames (CONTINUE, TEXT, BINARY).
+     *
+     * The server has already received the frame body for you - no allocation or
+     * httpd_ws_recv_frame() call is needed - but it does *not* reply. Consistent with
+     * handle_ws_control_frames being true, this handler owns the protocol reply:
+     * answer a PING with a PONG echoing the payload and a CLOSE with a CLOSE
+     * (RFC 6455 section 5.5); a PONG needs no reply. The frame may be reused for the
+     * reply by overwriting frame->type and passing it to httpd_ws_send_frame().
+     *
+     * The frame and its payload are owned by the server and are only valid for the
+     * duration of the call: the handler must not free or retain them, and must not
+     * grow frame->len beyond the received length, as the payload buffer is sized for
+     * a control frame only. Returning an error closes the connection.
+     *
+     * If left NULL, control frames continue to be delivered to the data handler,
+     * which remains responsible for receiving and replying to them (unchanged
+     * behavior).
      *
      * Placed at the end of the struct to keep positional initialization of existing
      * fields backward compatible.
      */
-    esp_err_t (*ws_control_handler)(httpd_req_t *req, const httpd_ws_frame_t *frame);
+    esp_err_t (*ws_control_handler)(httpd_req_t *req, httpd_ws_frame_t *frame);
 #endif /* CONFIG_HTTPD_WS_SUPPORT */
 } httpd_uri_t;
 

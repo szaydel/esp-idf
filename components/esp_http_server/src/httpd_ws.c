@@ -878,6 +878,9 @@ esp_err_t httpd_ws_handle_control_frame(httpd_req_t *req)
         return ESP_ERR_INVALID_ARG;
     }
     struct sock_db *sd = aux->sd;
+    if (sd->ws_control_handler == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
 
     /* The server receives the control-frame body itself. Oversized or malformed
      * frames are rejected by the max_len cap (zero-trust on client input). */
@@ -888,17 +891,9 @@ esp_err_t httpd_ws_handle_control_frame(httpd_req_t *req)
         return ret;
     }
 
-    /* Notify the user's control handler with a read-only view of the frame. */
-    esp_err_t handler_ret = ESP_OK;
-    if (sd->ws_control_handler != NULL) {
-        handler_ret = sd->ws_control_handler(req, &frame);
-    }
-
-    /* The server always performs the protocol reply (PONG for PING, CLOSE for
-     * CLOSE). If the handler failed, still reply, then propagate the error so the
-     * caller closes the socket. */
-    esp_err_t reply_ret = httpd_ws_reply_to_control_frame(req, &frame);
-    return (handler_ret != ESP_OK) ? handler_ret : reply_ret;
+    /* Hand the frame over. The server deliberately does not reply: with
+     * handle_ws_control_frames true the application owns the protocol reply */
+    return sd->ws_control_handler(req, &frame);
 }
 
 esp_err_t httpd_ws_get_frame_type(httpd_req_t *req)

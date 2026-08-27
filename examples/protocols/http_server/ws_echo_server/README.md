@@ -96,10 +96,10 @@ This example registers a dedicated control-frame handler on the `/ws` endpoint (
 
 ```c
         .handle_ws_control_frames = true,
-        .ws_control_handler = ws_control_frame_handler,  // observes PING/PONG/CLOSE
+        .ws_control_handler = ws_control_frame_handler,  // handles PING/PONG/CLOSE
 ```
 
-The handler only observes the frames (this example logs them); the server still sends the protocol replies (PONG for PING, CLOSE for CLOSE) itself. Send the text message `Ping` to the server to watch the full heartbeat round trip: the server sends a PING and the client's PONG response is logged by the control-frame handler.
+Control frames then go to `ws_control_frame_handler()` instead of the data handler, so `echo_handler()` only deals with TEXT/BINARY frames. The server receives the control frame body for the handler but does not reply, so the handler sends the protocol reply itself (a PONG echoing the payload for a PING, an empty CLOSE for a CLOSE). Send the text message `Ping` to the server to watch the full heartbeat round trip: the server sends a PING and the client's PONG response is logged by the control-frame handler.
 
 
 ### Hardware Required
