@@ -31,6 +31,9 @@
 
 #define ESP_RISCV_TRACE_BUFFER_ALIGNMENT      4
 
+/* One word is reserved so mem_end_addr can point at the last writable word. */
+#define ESP_RISCV_TRACE_BUFFER_MIN_SIZE       8
+
 static const char *TAG = "esp_riscv_trace";
 
 /* Handles created at startup by esp_riscv_trace_early_init(), one slot per core. */
@@ -41,15 +44,15 @@ static uint8_t *alloc_aligned_buffer(size_t requested, uint32_t caps, size_t *ou
     *out_size = 0;
 
     size_t cache_alignment = 0;
-    ESP_RETURN_ON_FALSE(esp_cache_get_alignment(caps, &cache_alignment) == ESP_OK, NULL, TAG,
-                        "failed to get buffer alignment");
+    ESP_RETURN_ON_FALSE_ISR(esp_cache_get_alignment(caps, &cache_alignment) == ESP_OK, NULL, TAG,
+                            "failed to get buffer alignment");
     size_t alignment = MAX(cache_alignment, ESP_RISCV_TRACE_BUFFER_ALIGNMENT);
 
-    ESP_RETURN_ON_FALSE(requested <= SIZE_MAX - (alignment - 1), NULL, TAG,
-                        "trace buffer size too large");
+    ESP_RETURN_ON_FALSE_ISR(requested <= SIZE_MAX - (alignment - 1), NULL, TAG,
+                            "trace buffer size too large");
     size_t size = ESP_ALIGN_UP(requested, alignment);
     uint8_t *buf = heap_caps_aligned_calloc(alignment, 1, size, caps);
-    ESP_RETURN_ON_FALSE(buf != NULL, NULL, TAG, "failed to allocate buffer");
+    ESP_RETURN_ON_FALSE_ISR(buf != NULL, NULL, TAG, "failed to allocate buffer");
     *out_size = size;
     return buf;
 }
@@ -161,19 +164,23 @@ static esp_err_t validate_filter_config(const esp_riscv_trace_filter_config_t *c
 static esp_err_t validate_trace_config(esp_riscv_trace_core_t core_id, const esp_riscv_trace_config_t *config,
                                        esp_riscv_trace_handle_t *ret_handle)
 {
-    ESP_RETURN_ON_FALSE(config != NULL, ESP_ERR_INVALID_ARG, TAG, "invalid argument");
-    ESP_RETURN_ON_FALSE(ret_handle != NULL, ESP_ERR_INVALID_ARG, TAG, "invalid argument");
-    ESP_RETURN_ON_FALSE((int)core_id >= 0 && (int)core_id < SOC_CPU_CORES_NUM,
-                        ESP_ERR_INVALID_ARG, TAG, "invalid core id");
-    ESP_RETURN_ON_FALSE(config->buffer_size != 0, ESP_ERR_INVALID_SIZE, TAG, "trace buffer size is 0");
-    ESP_RETURN_ON_FALSE(is_valid_address_mode(config->address_mode), ESP_ERR_INVALID_ARG, TAG, "invalid address mode");
-    ESP_RETURN_ON_FALSE(is_valid_mem_mode(config->mem_mode), ESP_ERR_INVALID_ARG, TAG, "invalid memory mode");
-    ESP_RETURN_ON_FALSE(is_valid_resync_mode(config->resync_mode), ESP_ERR_INVALID_ARG, TAG, "invalid resync mode");
-    ESP_RETURN_ON_FALSE(riscv_trace_ll_resync_mode_is_supported((uint32_t)config->resync_mode),
-                        ESP_ERR_NOT_SUPPORTED, TAG, "resync mode not supported on this target");
-    ESP_RETURN_ON_FALSE(is_valid_ahb_burst(config->ahb_burst), ESP_ERR_INVALID_ARG, TAG, "invalid AHB burst");
-    ESP_RETURN_ON_FALSE(is_valid_core_mask(config->core_mask), ESP_ERR_INVALID_ARG, TAG, "invalid core mask");
-    ESP_RETURN_ON_FALSE(is_valid_buffer_mem(config->buffer_mem), ESP_ERR_INVALID_ARG, TAG, "invalid buffer memory");
+    ESP_RETURN_ON_FALSE_ISR(config != NULL, ESP_ERR_INVALID_ARG, TAG, "invalid argument");
+    ESP_RETURN_ON_FALSE_ISR(ret_handle != NULL, ESP_ERR_INVALID_ARG, TAG, "invalid argument");
+    ESP_RETURN_ON_FALSE_ISR((int)core_id >= 0 && (int)core_id < SOC_CPU_CORES_NUM,
+                            ESP_ERR_INVALID_ARG, TAG, "invalid core id");
+    ESP_RETURN_ON_FALSE_ISR(config->buffer_size >= ESP_RISCV_TRACE_BUFFER_MIN_SIZE, ESP_ERR_INVALID_SIZE, TAG,
+                            "trace buffer must be at least %d bytes", ESP_RISCV_TRACE_BUFFER_MIN_SIZE);
+    ESP_RETURN_ON_FALSE_ISR(is_valid_address_mode(config->address_mode), ESP_ERR_INVALID_ARG, TAG,
+                            "invalid address mode");
+    ESP_RETURN_ON_FALSE_ISR(is_valid_mem_mode(config->mem_mode), ESP_ERR_INVALID_ARG, TAG, "invalid memory mode");
+    ESP_RETURN_ON_FALSE_ISR(is_valid_resync_mode(config->resync_mode), ESP_ERR_INVALID_ARG, TAG,
+                            "invalid resync mode");
+    ESP_RETURN_ON_FALSE_ISR(riscv_trace_ll_resync_mode_is_supported((uint32_t)config->resync_mode),
+                            ESP_ERR_NOT_SUPPORTED, TAG, "resync mode not supported on this target");
+    ESP_RETURN_ON_FALSE_ISR(is_valid_ahb_burst(config->ahb_burst), ESP_ERR_INVALID_ARG, TAG, "invalid AHB burst");
+    ESP_RETURN_ON_FALSE_ISR(is_valid_core_mask(config->core_mask), ESP_ERR_INVALID_ARG, TAG, "invalid core mask");
+    ESP_RETURN_ON_FALSE_ISR(is_valid_buffer_mem(config->buffer_mem), ESP_ERR_INVALID_ARG, TAG,
+                            "invalid buffer memory");
 
     return ESP_OK;
 }
@@ -183,21 +190,21 @@ static esp_err_t esp_riscv_trace_new(esp_riscv_trace_core_t core_id, const esp_r
 {
     esp_err_t ret = ESP_OK;
 
-    ESP_RETURN_ON_ERROR(validate_trace_config(core_id, config, ret_handle), TAG, "invalid trace configuration");
+    ESP_RETURN_ON_ERROR_ISR(validate_trace_config(core_id, config, ret_handle), TAG, "invalid trace configuration");
 
     size_t trace_mem_size = 0;
     uint8_t *trace_mem = alloc_aligned_buffer(config->buffer_size, trace_buffer_caps(config->buffer_mem),
                                               &trace_mem_size);
-    ESP_RETURN_ON_FALSE(trace_mem != NULL, ESP_ERR_NO_MEM, TAG, "failed to allocate trace buffer");
+    ESP_RETURN_ON_FALSE_ISR(trace_mem != NULL, ESP_ERR_NO_MEM, TAG, "failed to allocate trace buffer");
 
     esp_riscv_trace_handle_t handle = heap_caps_calloc(1, sizeof(struct esp_riscv_trace_context_t),
                                                        ESP_RISCV_TRACE_OBJ_CAPS);
-    ESP_GOTO_ON_FALSE(handle != NULL, ESP_ERR_NO_MEM, err_alloc, TAG, "no mem for the trace handle");
+    ESP_GOTO_ON_FALSE_ISR(handle != NULL, ESP_ERR_NO_MEM, err_alloc, TAG, "no mem for the trace handle");
 
     riscv_trace_hal_context_t hal_ctx;
     riscv_trace_hal_config_t hal_config = {
         .mem_start_addr = (uint32_t)trace_mem,
-        .mem_end_addr = (uint32_t)trace_mem + trace_mem_size,
+        .mem_end_addr = (uint32_t)trace_mem + trace_mem_size - sizeof(uint32_t),
         .full_address = (config->address_mode == ESP_RISCV_TRACE_ADDR_FULL),
         .mem_loop = (config->mem_mode == ESP_RISCV_TRACE_MEM_LOOP),
         .auto_restart = config->auto_restart,
