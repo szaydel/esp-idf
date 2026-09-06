@@ -853,7 +853,7 @@ esp_err_t httpd_req_new(struct httpd_data *hd, struct sock_db *sd)
 
         /* Dispatch the frame:
          *  - Control frames (CLOSE/PING/PONG) go to the dedicated control handler
-         *    when one is registered; the server then sends the protocol reply.
+         *    when one is registered; that handler owns the protocol reply.
          *  - Otherwise dispatch to the data handler for non-control frames, PONG
          *    frames, or when the handler opted in to receiving control frames.
          *    PONG must be dispatched so that user heartbeat code can track it and

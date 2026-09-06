@@ -107,6 +107,16 @@ static int ws_recv_fail_override(httpd_handle_t hd, int sockfd, char *buf, size_
     return HTTPD_SOCK_ERR_FAIL;
 }
 
+static int ws_send_fail_override(httpd_handle_t hd, int sockfd, const char *buf, size_t buf_len, int flags)
+{
+    (void)hd;
+    (void)sockfd;
+    (void)buf;
+    (void)buf_len;
+    (void)flags;
+    return HTTPD_SOCK_ERR_FAIL;
+}
+
 static int ws_scripted_recv_override(httpd_handle_t hd, int sockfd, char *buf, size_t buf_len, int flags)
 {
     (void)hd;
@@ -613,13 +623,29 @@ static esp_err_t ws_data_handler_spy(httpd_req_t *req)
     return ESP_OK;
 }
 
-static esp_err_t ws_control_handler_spy(httpd_req_t *req, const httpd_ws_frame_t *frame)
+/* Mirrors what an application does: the control handler owns the protocol reply.
+ * On a handler failure nothing is sent, because no other code replies for it. */
+static esp_err_t ws_control_handler_spy(httpd_req_t *req, httpd_ws_frame_t *frame)
 {
-    (void)req;
     s_ws_control_handler_calls++;
     s_ws_control_seen_type = frame->type;
     s_ws_control_seen_len = frame->len;
-    return s_ws_control_ret;
+    if (s_ws_control_ret != ESP_OK) {
+        return s_ws_control_ret;
+    }
+
+    switch (frame->type) {
+    case HTTPD_WS_TYPE_PING:
+        frame->type = HTTPD_WS_TYPE_PONG;
+        return httpd_ws_send_frame(req, frame);
+    case HTTPD_WS_TYPE_CLOSE:
+        frame->len = 0;
+        frame->payload = NULL;
+        return httpd_ws_send_frame(req, frame);
+    default:
+        /* A PONG needs no reply */
+        return ESP_OK;
+    }
 }
 
 /* Wire a fake session/server and reset all fixtures around a single frame. */
@@ -824,11 +850,28 @@ static void ws_setup_recv_fixture(struct httpd_data *hd, httpd_req_t *req,
     session->ws_handshake_done = true;
 }
 
-/* Asserts the session was marked closing and a 1002 (protocol-error) CLOSE
- * frame was emitted on the wire. */
-static void ws_assert_close_1002_sent(const struct sock_db *session)
+/* Common fake-session wiring for the send-path tests: a single-socket server
+ * whose send is captured. ws_handshake_done is left to the caller so tests can
+ * exercise the not-yet-handshaken path. */
+static void ws_setup_send_fixture(struct httpd_data *hd, struct sock_db *session)
 {
-    static const uint8_t expected_reply[] = { 0x88, 0x02, 0x03, 0xEA };
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+
+    memset(&ws_send_capture_ctx, 0, sizeof(ws_send_capture_ctx));
+
+    hd->config = config;
+    hd->config.max_open_sockets = 1;
+    hd->hd_sd = session;
+    session->fd = 123;
+    session->handle = (httpd_handle_t)hd;
+    session->send_fn = ws_scripted_send_override;
+}
+
+/* Asserts the session was marked closing and a CLOSE frame carrying the given
+ * status code was emitted on the wire. */
+static void ws_assert_close_sent(const struct sock_db *session, uint16_t code)
+{
+    const uint8_t expected_reply[] = { 0x88, 0x02, (uint8_t)(code >> 8U), (uint8_t)(code & 0xFFU) };
 
     TEST_ASSERT_TRUE(session->ws_close);
     TEST_ASSERT_EQUAL(sizeof(expected_reply), ws_send_capture_ctx.len);
@@ -846,7 +889,7 @@ TEST_CASE("WS recv RSV bit set sends CLOSE 1002 and marks close", "[HTTP SERVER]
     ws_setup_recv_fixture(&hd, &req, &aux, &session, ws_frame, sizeof(ws_frame));
 
     TEST_ASSERT_EQUAL(ESP_FAIL, httpd_ws_get_frame_type(&req));
-    ws_assert_close_1002_sent(&session);
+    ws_assert_close_sent(&session, 1002);
 }
 
 TEST_CASE("WS recv reserved non-control opcode sends CLOSE 1002", "[HTTP SERVER][websocket]")
@@ -861,7 +904,7 @@ TEST_CASE("WS recv reserved non-control opcode sends CLOSE 1002", "[HTTP SERVER]
 
     TEST_ASSERT_EQUAL(ESP_FAIL, httpd_ws_get_frame_type(&req));
     TEST_ASSERT_EQUAL(HTTPD_WS_TYPE_CLOSE, aux.ws_type);
-    ws_assert_close_1002_sent(&session);
+    ws_assert_close_sent(&session, 1002);
 }
 
 TEST_CASE("WS recv reserved control opcode sends CLOSE 1002", "[HTTP SERVER][websocket]")
@@ -876,7 +919,7 @@ TEST_CASE("WS recv reserved control opcode sends CLOSE 1002", "[HTTP SERVER][web
 
     TEST_ASSERT_EQUAL(ESP_FAIL, httpd_ws_get_frame_type(&req));
     TEST_ASSERT_EQUAL(HTTPD_WS_TYPE_CLOSE, aux.ws_type);
-    ws_assert_close_1002_sent(&session);
+    ws_assert_close_sent(&session, 1002);
 }
 
 TEST_CASE("WS recv fragmented control frame sends CLOSE 1002", "[HTTP SERVER][websocket]")
@@ -891,7 +934,7 @@ TEST_CASE("WS recv fragmented control frame sends CLOSE 1002", "[HTTP SERVER][we
 
     TEST_ASSERT_EQUAL(ESP_FAIL, httpd_ws_get_frame_type(&req));
     TEST_ASSERT_EQUAL(HTTPD_WS_TYPE_CLOSE, aux.ws_type);
-    ws_assert_close_1002_sent(&session);
+    ws_assert_close_sent(&session, 1002);
 }
 
 TEST_CASE("WS recv unmasked frame sends CLOSE 1002 and marks close", "[HTTP SERVER][websocket]")
@@ -911,7 +954,7 @@ TEST_CASE("WS recv unmasked frame sends CLOSE 1002 and marks close", "[HTTP SERV
     aux.ws_final = true;
 
     TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, httpd_ws_recv_frame(&req, &frame, 0));
-    ws_assert_close_1002_sent(&session);
+    ws_assert_close_sent(&session, 1002);
 }
 
 TEST_CASE("WS recv control frame with payload > 125 sends CLOSE 1002", "[HTTP SERVER][websocket]")
@@ -928,7 +971,7 @@ TEST_CASE("WS recv control frame with payload > 125 sends CLOSE 1002", "[HTTP SE
 
     TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, httpd_ws_get_frame_type(&req));
     TEST_ASSERT_EQUAL(HTTPD_WS_TYPE_CLOSE, aux.ws_type);
-    ws_assert_close_1002_sent(&session);
+    ws_assert_close_sent(&session, 1002);
 }
 
 TEST_CASE("WS recv rejects non-minimal 16-bit payload length encoding", "[HTTP SERVER][websocket]")
@@ -947,7 +990,7 @@ TEST_CASE("WS recv rejects non-minimal 16-bit payload length encoding", "[HTTP S
 
     TEST_ASSERT_EQUAL(ESP_FAIL, httpd_ws_recv_frame(&req, &frame, 0));
     TEST_ASSERT_EQUAL(HTTPD_WS_TYPE_CLOSE, aux.ws_type);
-    ws_assert_close_1002_sent(&session);
+    ws_assert_close_sent(&session, 1002);
 }
 
 TEST_CASE("WS recv rejects non-minimal 64-bit payload length encoding", "[HTTP SERVER][websocket]")
@@ -966,7 +1009,7 @@ TEST_CASE("WS recv rejects non-minimal 64-bit payload length encoding", "[HTTP S
 
     TEST_ASSERT_EQUAL(ESP_FAIL, httpd_ws_recv_frame(&req, &frame, 0));
     TEST_ASSERT_EQUAL(HTTPD_WS_TYPE_CLOSE, aux.ws_type);
-    ws_assert_close_1002_sent(&session);
+    ws_assert_close_sent(&session, 1002);
 }
 
 TEST_CASE("WS send refuses non-CLOSE frame once session is closing", "[HTTP SERVER][websocket]")
@@ -1008,6 +1051,306 @@ TEST_CASE("WS send refuses non-CLOSE frame once session is closing", "[HTTP SERV
     TEST_ASSERT_EQUAL(sizeof(expected_close), ws_send_capture_ctx.len);
     TEST_ASSERT_EQUAL_UINT8_ARRAY(expected_close, ws_send_capture_ctx.data, sizeof(expected_close));
 }
+
+TEST_CASE("WS auto CLOSE reply echoes received payload", "[HTTP SERVER][websocket]")
+{
+    /* CLOSE frame: FIN|CLOSE, MASK=1 len=4, zero mask, payload = 1000 + "OK" */
+    static const uint8_t ws_frame[] = {
+        0x88, 0x84, 0x00, 0x00, 0x00, 0x00, 0x03, 0xE8, 'O', 'K'
+    };
+    static const uint8_t expected_reply[] = { 0x88, 0x04, 0x03, 0xE8, 'O', 'K' };
+
+    struct httpd_data hd = {0};
+    struct httpd_req_aux aux = {0};
+    struct sock_db session = {0};
+    httpd_req_t req = {0};
+
+    ws_setup_recv_fixture(&hd, &req, &aux, &session, ws_frame, sizeof(ws_frame));
+
+    TEST_ASSERT_EQUAL(ESP_OK, httpd_ws_get_frame_type(&req));
+    TEST_ASSERT_EQUAL(sizeof(expected_reply), ws_send_capture_ctx.len);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected_reply, ws_send_capture_ctx.data, sizeof(expected_reply));
+}
+
+TEST_CASE("WS recv oversized frame fails connection with CLOSE 1009", "[HTTP SERVER][websocket]")
+{
+    /* A masked TEXT frame with a 4-byte payload, read with max_len = 2. The frame
+     * does not fit, and the payload is still queued in the socket. The library
+     * must fail the connection (CLOSE 1009). The scripted stream carries a second TEXT frame
+     * after the payload to represent that queued data. */
+    static const uint8_t ws_frame[] = {
+        0x84, 0x00, 0x00, 0x00, 0x00, 'd', 'a', 't', 'a',   /* first frame, len 4, zero mask */
+        0x81, 0x80, 0x00, 0x00, 0x00, 0x00                  /* a second frame that must never be read */
+    };
+    struct httpd_data hd = {0};
+    httpd_req_t req = {0};
+    struct httpd_req_aux aux = {0};
+    struct sock_db session = {0};
+    httpd_ws_frame_t frame = {0};
+
+    ws_setup_recv_fixture(&hd, &req, &aux, &session, ws_frame, sizeof(ws_frame));
+    aux.ws_type = HTTPD_WS_TYPE_TEXT;
+    aux.ws_final = true;
+
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_SIZE, httpd_ws_recv_frame(&req, &frame, 2));
+    ws_assert_close_sent(&session, 1009);
+
+    /* The library must fail, not drain: only the length byte and the 4 mask
+     * bytes are consumed. The 4 payload bytes and the whole second frame stay
+     * unread. */
+    TEST_ASSERT_EQUAL(5, ws_scripted_recv_ctx.offset);
+}
+
+TEST_CASE("WS recv rejects CLOSE frame with 1-byte payload", "[HTTP SERVER][websocket]")
+{
+    /* CLOSE with 1-byte body — always invalid */
+    static const uint8_t ws_frame[] = { 0x88, 0x81, 0x00, 0x00, 0x00, 0x00, 0x00 };
+
+    struct httpd_data hd = {0};
+    httpd_req_t req = {0};
+    struct httpd_req_aux aux = {0};
+    struct sock_db session = {0};
+
+    ws_setup_recv_fixture(&hd, &req, &aux, &session, ws_frame, sizeof(ws_frame));
+
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, httpd_ws_get_frame_type(&req));
+    TEST_ASSERT_EQUAL(HTTPD_WS_TYPE_CLOSE, aux.ws_type);
+    ws_assert_close_sent(&session, 1002);
+}
+
+TEST_CASE("WS recv rejects CLOSE frame with invalid close code", "[HTTP SERVER][websocket]")
+{
+    /* Close code 1005 is reserved and must not appear on the wire */
+    static const uint8_t ws_frame[] = { 0x88, 0x82, 0x00, 0x00, 0x00, 0x00, 0x03, 0xED };
+
+    struct httpd_data hd = {0};
+    httpd_req_t req = {0};
+    struct httpd_req_aux aux = {0};
+    struct sock_db session = {0};
+
+    ws_setup_recv_fixture(&hd, &req, &aux, &session, ws_frame, sizeof(ws_frame));
+
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, httpd_ws_get_frame_type(&req));
+    TEST_ASSERT_EQUAL(HTTPD_WS_TYPE_CLOSE, aux.ws_type);
+    ws_assert_close_sent(&session, 1002);
+}
+
+TEST_CASE("WS recv rejects CLOSE frame with invalid UTF-8 reason", "[HTTP SERVER][websocket]")
+{
+    /* Code 1000 (valid) but reason is overlong UTF-8 0xC0 0xAF */
+    static const uint8_t ws_frame[] = {
+        0x88, 0x84, 0x00, 0x00, 0x00, 0x00, 0x03, 0xE8, 0xC0, 0xAF
+    };
+
+    struct httpd_data hd = {0};
+    httpd_req_t req = {0};
+    struct httpd_req_aux aux = {0};
+    struct sock_db session = {0};
+
+    ws_setup_recv_fixture(&hd, &req, &aux, &session, ws_frame, sizeof(ws_frame));
+
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, httpd_ws_get_frame_type(&req));
+    TEST_ASSERT_EQUAL(HTTPD_WS_TYPE_CLOSE, aux.ws_type);
+    ws_assert_close_sent(&session, 1007);
+}
+
+TEST_CASE("WS recv rejects invalid UTF-8 in text frame", "[HTTP SERVER][websocket]")
+{
+    /* recv_frame starts at the second byte (get_frame_type already consumed the
+     * opcode). Second byte 0x82: MASK=1 len=2, zero mask key, payload 0xC0 0xAF
+     * (an overlong UTF-8 encoding). aux.ws_type is forced to TEXT below so the
+     * UTF-8 validator runs on this payload. */
+    static const uint8_t ws_frame[] = { 0x82, 0x00, 0x00, 0x00, 0x00, 0xC0, 0xAF };
+
+    struct httpd_data hd = {0};
+    httpd_req_t req = {0};
+    struct httpd_req_aux aux = {0};
+    struct sock_db session = {0};
+    httpd_ws_frame_t frame = {0};
+    uint8_t payload[2] = {0};
+
+    frame.payload = payload;
+    ws_setup_recv_fixture(&hd, &req, &aux, &session, ws_frame, sizeof(ws_frame));
+    aux.ws_type = HTTPD_WS_TYPE_TEXT;
+    aux.ws_final = true;
+
+    TEST_ASSERT_EQUAL(ESP_FAIL, httpd_ws_recv_frame(&req, &frame, 2));
+    ws_assert_close_sent(&session, 1007);
+}
+
+TEST_CASE("WS recv accepts CLOSE frame with IANA close code 1013", "[HTTP SERVER][websocket]")
+{
+    /* CLOSE, MASK=1 len=2, zero mask, payload code 1013 (0x03F5) */
+    static const uint8_t ws_frame[] = {
+        0x88, 0x82, 0x00, 0x00, 0x00, 0x00, 0x03, 0xF5
+    };
+    /* Strict mode echoes the received CLOSE payload back to the client. */
+    static const uint8_t expected_reply[] = { 0x88, 0x02, 0x03, 0xF5 };
+
+    struct httpd_data hd = {0};
+    struct httpd_req_aux aux = {0};
+    struct sock_db session = {0};
+    httpd_req_t req = {0};
+
+    ws_setup_recv_fixture(&hd, &req, &aux, &session, ws_frame, sizeof(ws_frame));
+
+    /* Validator accepts 1013 → auto CLOSE-echo path runs successfully. */
+    TEST_ASSERT_EQUAL(ESP_OK, httpd_ws_get_frame_type(&req));
+    TEST_ASSERT_EQUAL(sizeof(expected_reply), ws_send_capture_ctx.len);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected_reply, ws_send_capture_ctx.data, sizeof(expected_reply));
+}
+
+TEST_CASE("httpd_ws_validate_utf8 accepts valid and rejects malformed UTF-8", "[HTTP SERVER][websocket]")
+{
+    /* Empty buffer is valid; NULL with len=0 is also valid. */
+    TEST_ASSERT_EQUAL(ESP_OK, httpd_ws_validate_utf8(NULL, 0));
+    TEST_ASSERT_EQUAL(ESP_OK, httpd_ws_validate_utf8((const uint8_t *)"", 0));
+
+    /* NULL with non-zero length is rejected. */
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, httpd_ws_validate_utf8(NULL, 4));
+
+    /* Valid ASCII and well-formed multi-byte sequences. */
+    static const uint8_t valid_ascii[]  = { 'h', 'e', 'l', 'l', 'o' };
+    static const uint8_t valid_two[]    = { 0xC3, 0xB1 };                   /* U+00F1 */
+    static const uint8_t valid_three[]  = { 0xE2, 0x82, 0xAC };             /* U+20AC */
+    static const uint8_t valid_four[]   = { 0xF0, 0x9F, 0x98, 0x80 };       /* U+1F600 */
+    TEST_ASSERT_EQUAL(ESP_OK, httpd_ws_validate_utf8(valid_ascii, sizeof(valid_ascii)));
+    TEST_ASSERT_EQUAL(ESP_OK, httpd_ws_validate_utf8(valid_two,   sizeof(valid_two)));
+    TEST_ASSERT_EQUAL(ESP_OK, httpd_ws_validate_utf8(valid_three, sizeof(valid_three)));
+    TEST_ASSERT_EQUAL(ESP_OK, httpd_ws_validate_utf8(valid_four,  sizeof(valid_four)));
+
+    /* Overlong 2-byte (C0 80 would encode U+0000). */
+    static const uint8_t overlong2[]    = { 0xC0, 0x80 };
+    /* Overlong 3-byte (E0 80 80). */
+    static const uint8_t overlong3[]    = { 0xE0, 0x80, 0x80 };
+    /* UTF-16 surrogate (ED A0 80 = U+D800). */
+    static const uint8_t surrogate[]    = { 0xED, 0xA0, 0x80 };
+    /* Beyond U+10FFFF (F4 90 80 80). */
+    static const uint8_t beyond_max[]   = { 0xF4, 0x90, 0x80, 0x80 };
+    /* Invalid lead byte F5. */
+    static const uint8_t bad_lead[]     = { 0xF5, 0x80, 0x80, 0x80 };
+    /* Stray continuation byte without a lead. */
+    static const uint8_t stray_trail[]  = { 0x80 };
+    /* Truncated 2-byte sequence (C3 without trail). */
+    static const uint8_t truncated[]    = { 0xC3 };
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, httpd_ws_validate_utf8(overlong2,   sizeof(overlong2)));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, httpd_ws_validate_utf8(overlong3,   sizeof(overlong3)));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, httpd_ws_validate_utf8(surrogate,   sizeof(surrogate)));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, httpd_ws_validate_utf8(beyond_max,  sizeof(beyond_max)));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, httpd_ws_validate_utf8(bad_lead,    sizeof(bad_lead)));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, httpd_ws_validate_utf8(stray_trail, sizeof(stray_trail)));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, httpd_ws_validate_utf8(truncated,   sizeof(truncated)));
+}
+
+TEST_CASE("httpd_ws_close_session emits CLOSE with code and reason, marks closing", "[HTTP SERVER][websocket]")
+{
+    /* Expected wire bytes: FIN|CLOSE, len=5, 0x03E8 (=1000), "bye" */
+    static const uint8_t expected[] = { 0x88, 0x05, 0x03, 0xE8, 'b', 'y', 'e' };
+
+    struct httpd_data hd = {0};
+    struct sock_db session = {0};
+
+    ws_setup_send_fixture(&hd, &session);
+    session.ws_handshake_done = true;
+
+    TEST_ASSERT_EQUAL(ESP_OK, httpd_ws_close_session(&hd, session.fd, 1000, "bye"));
+    TEST_ASSERT_TRUE(session.ws_close);
+    TEST_ASSERT_EQUAL(sizeof(expected), ws_send_capture_ctx.len);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected, ws_send_capture_ctx.data, sizeof(expected));
+}
+
+TEST_CASE("httpd_ws_close_session rejects invalid input and is idempotent", "[HTTP SERVER][websocket]")
+{
+    struct httpd_data hd = {0};
+    struct sock_db session = {0};
+    /* Reason buffer 124 bytes (exceeds 123-byte cap). */
+    char too_long[125];
+    memset(too_long, 'x', sizeof(too_long) - 1);
+    too_long[sizeof(too_long) - 1] = '\0';
+    /* Reason containing overlong UTF-8. */
+    static const char bad_utf8[] = { (char)0xC0, (char)0x80, '\0' };
+
+    ws_setup_send_fixture(&hd, &session);
+
+    /* Not-yet-handshaken socket → ESP_ERR_INVALID_STATE, no send. */
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, httpd_ws_close_session(&hd, session.fd, 1000, NULL));
+    TEST_ASSERT_EQUAL(0, ws_send_capture_ctx.len);
+
+    session.ws_handshake_done = true;
+
+    /* Reserved close code → ESP_ERR_INVALID_ARG, no send. */
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, httpd_ws_close_session(&hd, session.fd, 1005, NULL));
+    TEST_ASSERT_EQUAL(0, ws_send_capture_ctx.len);
+
+    /* Reason over 123 bytes → ESP_ERR_INVALID_ARG, no send. */
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, httpd_ws_close_session(&hd, session.fd, 1000, too_long));
+    TEST_ASSERT_EQUAL(0, ws_send_capture_ctx.len);
+
+    /* Reason with malformed UTF-8 → ESP_ERR_INVALID_ARG, no send. */
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, httpd_ws_close_session(&hd, session.fd, 1000, bad_utf8));
+    TEST_ASSERT_EQUAL(0, ws_send_capture_ctx.len);
+
+    /* Valid close emits a CLOSE frame and marks ws_close. */
+    TEST_ASSERT_EQUAL(ESP_OK, httpd_ws_close_session(&hd, session.fd, 1000, NULL));
+    TEST_ASSERT_TRUE(session.ws_close);
+    TEST_ASSERT_EQUAL(4, ws_send_capture_ctx.len); /* 0x88 0x02 0x03 0xE8 */
+
+    /* Second call on an already-closing session is a no-op (returns OK, no second send). */
+    size_t bytes_after_first = ws_send_capture_ctx.len;
+    TEST_ASSERT_EQUAL(ESP_OK, httpd_ws_close_session(&hd, session.fd, 1001, "again"));
+    TEST_ASSERT_EQUAL(bytes_after_first, ws_send_capture_ctx.len);
+
+    /* Already-closing wins over argument validation: invalid code and reason
+     * are not inspected because nothing will be sent. */
+    TEST_ASSERT_EQUAL(ESP_OK, httpd_ws_close_session(&hd, session.fd, 1005, bad_utf8));
+    TEST_ASSERT_EQUAL(bytes_after_first, ws_send_capture_ctx.len);
+}
+
+TEST_CASE("WS recv short mask-key read fails the connection", "[HTTP SERVER][websocket]")
+{
+    /* Second byte 0x82: MASK=1 len=2. The buffer ends here, so the mask-key
+     * read returns short. The desynchronized stream must fail the connection
+     * per RFC 6455 §7.1.7: session marked closing, CLOSE 1002 emitted. */
+    static const uint8_t ws_frame[] = { 0x82 };
+
+    struct httpd_data hd = {0};
+    httpd_req_t req = {0};
+    struct httpd_req_aux aux = {0};
+    struct sock_db session = {0};
+    httpd_ws_frame_t frame = {0};
+
+    ws_setup_recv_fixture(&hd, &req, &aux, &session, ws_frame, sizeof(ws_frame));
+    aux.ws_type = HTTPD_WS_TYPE_BINARY;
+    aux.ws_final = true;
+
+    TEST_ASSERT_EQUAL(ESP_FAIL, httpd_ws_recv_frame(&req, &frame, 0));
+    TEST_ASSERT_EQUAL(HTTPD_WS_TYPE_CLOSE, aux.ws_type);
+    ws_assert_close_sent(&session, 1002);
+}
+
+TEST_CASE("httpd_ws_close_session rolls back ws_close when send fails", "[HTTP SERVER][websocket]")
+{
+    struct httpd_data hd = {0};
+    struct sock_db session = {0};
+
+    ws_setup_send_fixture(&hd, &session);
+    session.send_fn = ws_send_fail_override; /* every send returns -1 */
+    session.ws_handshake_done = true;
+
+    /* First attempt: transport send fails, ws_close must be rolled back so
+     * the caller can retry and the post-CLOSE outbound gate doesn't strand
+     * the session. */
+    TEST_ASSERT_EQUAL(ESP_FAIL, httpd_ws_close_session(&hd, session.fd, 1000, NULL));
+    TEST_ASSERT_FALSE(session.ws_close);
+
+    /* A second attempt with a working transport now succeeds (proving the
+     * idempotency short-circuit didn't permanently no-op the session). */
+    session.send_fn = ws_scripted_send_override;
+    memset(&ws_send_capture_ctx, 0, sizeof(ws_send_capture_ctx));
+    TEST_ASSERT_EQUAL(ESP_OK, httpd_ws_close_session(&hd, session.fd, 1000, NULL));
+    TEST_ASSERT_TRUE(session.ws_close);
+    TEST_ASSERT_EQUAL(4, ws_send_capture_ctx.len); /* 0x88 0x02 0x03 0xE8 */
+}
 #endif /* CONFIG_HTTPD_WS_STRICTER_RFC6455 */
 
 TEST_CASE("WS send uses 16-bit length encoding for exactly 65535-byte payload", "[HTTP SERVER][websocket]")
@@ -1037,7 +1380,7 @@ TEST_CASE("WS send uses 16-bit length encoding for exactly 65535-byte payload", 
     TEST_ASSERT_EQUAL_UINT8_ARRAY(expected_header, ws_send_capture_ctx.data, sizeof(expected_header));
 }
 
-TEST_CASE("WS control handler receives PING and server replies PONG", "[HTTP SERVER][websocket]")
+TEST_CASE("WS control handler owns the PONG reply for PING", "[HTTP SERVER][websocket]")
 {
     /* Masked (zero-key) PING carrying a 2-byte payload "Hi". */
     static const uint8_t ping_frame[] = { 0x89, 0x82, 0x00, 0x00, 0x00, 0x00, 'H', 'i' };
@@ -1055,13 +1398,13 @@ TEST_CASE("WS control handler receives PING and server replies PONG", "[HTTP SER
     TEST_ASSERT_EQUAL(2, s_ws_control_seen_len);
     TEST_ASSERT_EQUAL(0, s_ws_data_handler_calls);   /* control frame must not reach data handler */
     TEST_ASSERT_GREATER_THAN(0, s_ws_sent_len);
-    TEST_ASSERT_EQUAL_HEX8(0x8A, s_ws_sent[0]);      /* FIN | PONG */
+    TEST_ASSERT_EQUAL_HEX8(0x8A, s_ws_sent[0]);      /* FIN | PONG, sent by the handler */
     TEST_ASSERT_FALSE(session.ws_close);
 
     free(hd.hd_req_aux.resp_hdrs);
 }
 
-TEST_CASE("WS control handler receives CLOSE and server replies CLOSE", "[HTTP SERVER][websocket]")
+TEST_CASE("WS control handler owns the CLOSE reply for CLOSE", "[HTTP SERVER][websocket]")
 {
     static const uint8_t close_frame[] = { 0x88, 0x80, 0x00, 0x00, 0x00, 0x00 };
     struct httpd_data hd = {0};
@@ -1077,7 +1420,7 @@ TEST_CASE("WS control handler receives CLOSE and server replies CLOSE", "[HTTP S
     TEST_ASSERT_EQUAL(HTTPD_WS_TYPE_CLOSE, s_ws_control_seen_type);
     TEST_ASSERT_EQUAL(0, s_ws_data_handler_calls);
     TEST_ASSERT_GREATER_THAN(0, s_ws_sent_len);
-    TEST_ASSERT_EQUAL_HEX8(0x88, s_ws_sent[0]);      /* FIN | CLOSE */
+    TEST_ASSERT_EQUAL_HEX8(0x88, s_ws_sent[0]);      /* FIN | CLOSE, sent by the handler */
     TEST_ASSERT_TRUE(session.ws_close);              /* server marked the session for close */
 
     free(hd.hd_req_aux.resp_hdrs);
@@ -1126,11 +1469,12 @@ TEST_CASE("WS without control handler auto-replies PING (backward compatible)", 
     free(hd.hd_req_aux.resp_hdrs);
 }
 
-TEST_CASE("WS control handler error still replies then closes socket", "[HTTP SERVER][websocket]")
+TEST_CASE("WS control handler error sends no reply and closes socket", "[HTTP SERVER][websocket]")
 {
     /* A PING is used so ws_close stays false and cleanup does not touch the fake
-     * control socket. The handler fails, but the server must still send the PONG,
-     * and httpd_req_new() must propagate the error so the caller closes the socket. */
+     * control socket. The handler owns the reply, so a handler failure puts nothing
+     * on the wire, and httpd_req_new() propagates the error so the caller closes
+     * the socket. */
     static const uint8_t ping_frame[] = { 0x89, 0x80, 0x00, 0x00, 0x00, 0x00 };
     struct httpd_data hd = {0};
     struct sock_db session = {0};
@@ -1143,8 +1487,7 @@ TEST_CASE("WS control handler error still replies then closes socket", "[HTTP SE
 
     TEST_ASSERT_EQUAL(ESP_FAIL, ret);                /* error propagated to caller */
     TEST_ASSERT_EQUAL(1, s_ws_control_handler_calls);
-    TEST_ASSERT_GREATER_THAN(0, s_ws_sent_len);
-    TEST_ASSERT_EQUAL_HEX8(0x8A, s_ws_sent[0]);      /* reply sent despite handler error */
+    TEST_ASSERT_EQUAL(0, s_ws_sent_len);             /* no reply: the handler owns it */
 
     free(hd.hd_req_aux.resp_hdrs);
 }
